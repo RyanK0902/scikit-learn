@@ -57,6 +57,10 @@ cdef class Splitter:
     cdef const DOUBLE_t[:, ::1] y
     cdef DOUBLE_t* sample_weight
 
+    cdef object bin_mapper               # object of the _BinMapper class
+    cdef DTYPE_t[:,::1] samples_to_bins  # Mappings of samples -> bins
+    cdef DTYPE_t[::1] bin_indices        # 1d column of samples_to_bins
+
     # The samples vector `samples` is maintained by the Splitter object such
     # that the samples contained in a node are contiguous. With this setting,
     # `node_split` reorganizes the node samples `samples[start:end]` in two

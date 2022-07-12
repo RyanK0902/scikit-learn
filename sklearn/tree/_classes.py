@@ -79,7 +79,11 @@ CRITERIA_REG = {
     "poisson": _criterion.Poisson,
 }
 
-DENSE_SPLITTERS = {"best": _splitter.BestSplitter, "random": _splitter.RandomSplitter}
+DENSE_SPLITTERS = {
+    "best": _splitter.BestSplitter,
+    "random": _splitter.RandomSplitter,
+    "histogram": _splitter.HistBestSplitter
+}
 
 SPARSE_SPLITTERS = {
     "best": _splitter.BestSparseSplitter,
@@ -99,7 +103,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
     """
 
     _parameter_constraints = {
-        "splitter": [StrOptions({"best", "random"})],
+        "splitter": [StrOptions({"best", "random", "histogram"})],
         "max_depth": [Interval(Integral, 1, None, closed="left"), None],
         "min_samples_split": [
             Interval(Integral, 2, None, closed="left"),
