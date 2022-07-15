@@ -157,31 +157,14 @@ cdef class Splitter:
         self.y = y
 
         self.sample_weight = sample_weight
-
-        # create binmapping if using histogram
-        bin_mapper = _BinMapper(
-            n_bins=256,  # Todo: fix this hard coding
-            is_categorical=None,
-            known_categories=None,
-            random_state=None,
-            n_threads=None,
-        )
-        self.bin_indices = np.empty(j, dtype=np.float32)
-        self.samples_to_bins = np.empty((j, n_features), dtype=np.float32)
-        cdef DTYPE_t[:,::1] samples_to_bins = self.samples_to_bins
-        cdef DTYPE_t[::1] X_row = np.empty(n_features, dtype=np.float32)
-
-        for i in range(j):
-            X_row = X[samples[i]]
-            samples_to_bins[i] = X_row  # TODO: when is X not a numpy array?
-        _samples_to_bins = bin_mapper.fit_transform(samples_to_bins.base)
-        samples_to_bins = np.ascontiguousarray(_samples_to_bins, dtype=np.float32)
         return 0
 
+    cdef int histogram_reset(self) except -1:
+        pass
 
     cdef int node_reset(self, SIZE_t start, SIZE_t end,
                         double* weighted_n_node_samples) nogil except -1:
-        """Reset splitter on node samples[start:end].
+        """Reset splitter on node samples[start:end]. 
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
         or 0 otherwise. 
@@ -584,6 +567,37 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                                self.min_weight_leaf,
                                self.random_state), self.__getstate__())
 
+    cdef int histogram_reset(self) except -1:
+        print("=> ENTER: histogram_reset")
+        bin_mapper = _BinMapper(
+            n_bins=256,  # Todo: fix this hard coding
+            is_categorical=None,
+            known_categories=None,
+            random_state=self.rand_r_state,
+            n_threads=None,
+        )
+        cdef int sample_size = self.end - self.start
+        self.bin_indices = np.empty(sample_size, dtype=np.float32)
+        self.samples_to_bins = np.empty((sample_size, self.n_features), dtype=np.float32)
+
+        print("     ...creating memoryview")
+        cdef DTYPE_t[:,::1] samples_to_bins = self.samples_to_bins
+        cdef DTYPE_t[:] X_row = np.empty(self.n_features, dtype=np.float32)
+        cdef DTYPE_t[:,:] X = self.X.copy()
+
+        cdef int idx = 0
+        print("     ...filling up samples_to_bins")
+        for i in range(self.start, self.end):
+            X_row = X[self.samples[i]]
+            samples_to_bins[idx] = X_row
+            idx += 1
+
+        print("     ...calling bin_mapper functions")
+        _samples_to_bins = bin_mapper.fit_transform(samples_to_bins)
+        samples_to_bins = np.ascontiguousarray(_samples_to_bins, dtype=np.float32)
+        print("=> EXIT: histogram_reset")
+        return 0
+
     cdef int node_split(
             self,
             double impurity,
@@ -596,6 +610,9 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         or 0 otherwise.
         """
         # Find the best split
+        with gil:
+            print("=> ENTER: node split")
+            print("     ...initializing cdef")
         cdef SIZE_t[::1] samples = self.samples
         cdef SIZE_t[::1] dummy_samples = self.samples   # Todo: find a better way to do this
         cdef SIZE_t start = self.start
@@ -651,6 +668,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         # newly discovered constant features to spare computation on descendant
         # nodes.
 
+        with gil:
+            print("     ...entering while loop")
         while (f_i > n_total_constants and  # Stop early if remaining features
                                             # are constant
                 (n_visited_features < max_features or
@@ -757,6 +776,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     best = current  # copy
 
         # Reorganize into samples[start:best.pos] + samples[best.pos:end]
+        with gil:
+            print("     ...reorganizing samples")
         if best.pos < end:
             partition_end = end
             p = start
@@ -790,6 +811,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         # Return values
         split[0] = best
         n_constant_features[0] = n_total_constants
+        with gil:
+            print("=> EXIT: node split")
         return 0
 
     cdef int mab_split(

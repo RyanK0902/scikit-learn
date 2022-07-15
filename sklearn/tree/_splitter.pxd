@@ -57,7 +57,6 @@ cdef class Splitter:
     cdef const DOUBLE_t[:, ::1] y
     cdef DOUBLE_t* sample_weight
 
-    cdef object bin_mapper               # object of the _BinMapper class
     cdef DTYPE_t[:,::1] samples_to_bins  # Mappings of samples -> bins
     cdef DTYPE_t[::1] bin_indices        # 1d column of samples_to_bins
 
@@ -80,6 +79,8 @@ cdef class Splitter:
     # Methods
     cdef int init(self, object X, const DOUBLE_t[:, ::1] y,
                   DOUBLE_t* sample_weight) except -1
+
+    cdef int histogram_reset(self) except -1
 
     cdef int node_reset(self, SIZE_t start, SIZE_t end,
                         double* weighted_n_node_samples) nogil except -1

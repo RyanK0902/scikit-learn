@@ -189,7 +189,6 @@ class _BinMapper(TransformerMixin, BaseEstimator):
                     self.n_bins
                 )
             )
-
         X = check_array(X, dtype=[X_DTYPE], force_all_finite=False)
         max_bins = self.n_bins - 1
 
@@ -202,7 +201,6 @@ class _BinMapper(TransformerMixin, BaseEstimator):
             self.is_categorical_ = np.zeros(X.shape[1], dtype=np.uint8)
         else:
             self.is_categorical_ = np.asarray(self.is_categorical, dtype=np.uint8)
-
         n_features = X.shape[1]
         known_categories = self.known_categories
         if known_categories is None:
@@ -221,7 +219,6 @@ class _BinMapper(TransformerMixin, BaseEstimator):
                     f"Feature {f_idx} isn't marked as a categorical feature, "
                     "but categories were passed."
                 )
-
         self.missing_values_bin_idx_ = self.n_bins - 1
 
         self.bin_thresholds_ = []

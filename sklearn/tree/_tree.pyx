@@ -210,6 +210,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 "n_constant_features": 0})
 
             while not builder_stack.empty():
+                with gil: print("----ENTERING TREE LOOP----")
                 stack_record = builder_stack.top()
                 builder_stack.pop()
 
@@ -223,7 +224,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 n_node_samples = end - start
                 splitter.node_reset(start, end, &weighted_n_node_samples)
-
                 is_leaf = (depth >= max_depth or
                            n_node_samples < min_samples_split or
                            n_node_samples < 2 * min_samples_leaf or
@@ -237,6 +237,9 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 is_leaf = is_leaf or impurity <= EPSILON
 
                 if not is_leaf:
+                    with gil:
+                        # Todo: calling histogram_reset causes race conditions?
+                        splitter.histogram_reset()
                     splitter.node_split(impurity, &split, &n_constant_features)
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are
@@ -280,6 +283,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 if depth > max_depth_seen:
                     max_depth_seen = depth
+                with gil: print("----EXITING TREE LOOP----\n")
 
             if rc >= 0:
                 rc = tree._resize_c(tree.node_count)
@@ -287,6 +291,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
             if rc >= 0:
                 tree.max_depth = max_depth_seen
         if rc == -1:
+
             raise MemoryError()
 
 

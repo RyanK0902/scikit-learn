@@ -38,15 +38,16 @@ def tree_iris_vanilla(seed):
 
     # fitting tree
     print("=> histogram")
-    tree = DecisionTreeClassifier(splitter="histogram")
+    tree = DecisionTreeClassifier(splitter="histogram", random_state=seed)
     # tree = DecisionTreeClassifier()
     tree.fit(train_image, train_target)
 
     # testing tree
     score = tree.score(test_image, test_target)
     print("=> score: ", score)
+    print("------ this is the end ------")
 
 
 if __name__ == "__main__":
-    tree_iris_vanilla(0)
+    tree_iris_vanilla(seed=0)
     # forest_digits_vanilla(0)
