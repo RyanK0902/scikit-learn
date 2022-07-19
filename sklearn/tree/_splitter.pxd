@@ -44,6 +44,7 @@ cdef class Splitter:
     cdef UINT32_t rand_r_state           # sklearn_rand_r random number state
 
     cdef SIZE_t[::1] samples             # Sample indices in X, y
+    cdef SIZE_t[::1] dummy_samples
     cdef SIZE_t n_samples                # X.shape[0]
     cdef double weighted_n_samples       # Weighted number of samples
     cdef SIZE_t[::1] features            # Feature indices in X

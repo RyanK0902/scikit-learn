@@ -27,6 +27,7 @@ from ._utils cimport log
 from ._utils cimport rand_int
 from ._utils cimport rand_uniform
 from ._utils cimport RAND_R_MAX
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 cdef double INFINITY = np.inf
 
@@ -126,6 +127,7 @@ cdef class Splitter:
         # Create a new array which will be used to store nonzero
         # samples from the feature of interest
         self.samples = np.empty(n_samples, dtype=np.intp)
+        self.dummy_samples = np.empty(n_samples, dtype=np.intp)
         cdef SIZE_t[::1] samples = self.samples
 
         cdef SIZE_t i, j
@@ -152,10 +154,10 @@ cdef class Splitter:
         self.n_features = n_features
 
         self.feature_values = np.empty(n_samples, dtype=np.float32)
+        self.bin_indices = np.empty(n_samples, dtype=np.float32)
         self.constant_features = np.empty(n_features, dtype=np.intp)
 
         self.y = y
-
         self.sample_weight = sample_weight
         return 0
 
@@ -568,34 +570,32 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                                self.random_state), self.__getstate__())
 
     cdef int histogram_reset(self) except -1:
-        print("=> ENTER: histogram_reset")
+        # print("=> ENTER: histogram_reset")
         bin_mapper = _BinMapper(
             n_bins=256,  # Todo: fix this hard coding
             is_categorical=None,
             known_categories=None,
             random_state=self.rand_r_state,
-            n_threads=None,
+            n_threads=1
         )
-        cdef int sample_size = self.end - self.start
-        self.bin_indices = np.empty(sample_size, dtype=np.float32)
-        self.samples_to_bins = np.empty((sample_size, self.n_features), dtype=np.float32)
+        cdef SIZE_t start = self.start
+        cdef SIZE_t end = self.end
+        self.samples_to_bins = np.empty((end - start, self.n_features), dtype=np.float32)
 
-        print("     ...creating memoryview")
+        # print("     ...creating memoryview")
         cdef DTYPE_t[:,::1] samples_to_bins = self.samples_to_bins
-        cdef DTYPE_t[:] X_row = np.empty(self.n_features, dtype=np.float32)
-        cdef DTYPE_t[:,:] X = self.X.copy()
+        cdef DTYPE_t[::1] X_row = np.empty(self.n_features, dtype=np.float32)
+        cdef DTYPE_t[:,::1] X = self.X.copy()
 
-        cdef int idx = 0
-        print("     ...filling up samples_to_bins")
-        for i in range(self.start, self.end):
+        # print("     ...filling up samples_to_bins")
+        for i in range(start, end):
             X_row = X[self.samples[i]]
-            samples_to_bins[idx] = X_row
-            idx += 1
+            samples_to_bins[i - start] = X_row  # dimensions are dynamic depending on node
 
-        print("     ...calling bin_mapper functions")
+        # print("     ...calling bin_mapper functions")
         _samples_to_bins = bin_mapper.fit_transform(samples_to_bins)
         samples_to_bins = np.ascontiguousarray(_samples_to_bins, dtype=np.float32)
-        print("=> EXIT: histogram_reset")
+        # print("=> EXIT: histogram_reset")
         return 0
 
     cdef int node_split(
@@ -610,9 +610,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         or 0 otherwise.
         """
         # Find the best split
-        with gil:
-            print("=> ENTER: node split")
-            print("     ...initializing cdef")
         cdef SIZE_t[::1] samples = self.samples
         cdef SIZE_t[::1] dummy_samples = self.samples   # Todo: find a better way to do this
         cdef SIZE_t start = self.start
@@ -667,9 +664,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         # for good splitting) by ancestor nodes and save the information on
         # newly discovered constant features to spare computation on descendant
         # nodes.
-
-        with gil:
-            print("     ...entering while loop")
         while (f_i > n_total_constants and  # Stop early if remaining features
                                             # are constant
                 (n_visited_features < max_features or
@@ -711,12 +705,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             # effectively.
             for i in range(start, end):
                 Xf[i] = self.X[samples[i], current.feature]
-                bin_indices[i] = samples_to_bins[i, current.feature]
-
+                bin_indices[i] = samples_to_bins[i - start, current.feature]
 
             sort(&Xf[start], &samples[start], end - start)
             sort(&bin_indices[start], &dummy_samples[start], end - start)   # Todo: find a better way to do this
-            # sort(&Xf[start], &samples_to_bins[start], end - start) # Todo: maybe just leave as is??
 
             if Xf[end - 1] <= Xf[start] + FEATURE_THRESHOLD:
                 features[f_j], features[n_total_constants] = features[n_total_constants], features[f_j]
@@ -730,9 +722,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             # Evaluate all splits
             self.criterion.reset()
             p = start
-
             while p < end:
-                # while p + 1 < end and Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD:
+                #while p + 1 < end and Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD:
                 while p + 1 < end and bin_indices[p + 1] <= bin_indices[p]:
                     p += 1
 
@@ -776,8 +767,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     best = current  # copy
 
         # Reorganize into samples[start:best.pos] + samples[best.pos:end]
-        with gil:
-            print("     ...reorganizing samples")
         if best.pos < end:
             partition_end = end
             p = start
@@ -811,8 +800,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         # Return values
         split[0] = best
         n_constant_features[0] = n_total_constants
-        with gil:
-            print("=> EXIT: node split")
         return 0
 
     cdef int mab_split(
@@ -881,7 +868,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             # for good splitting) by ancestor nodes and save the information on
             # newly discovered constant features to spare computation on descendant
             # nodes.
-
             while (f_i > n_total_constants and  # Stop early if remaining features
                                                 # are constant
                     (n_visited_features < max_features or
@@ -923,12 +909,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 # effectively.
                 for i in range(start, end):
                     Xf[i] = self.X[samples[i], current.feature]
-                    bin_indices[i] = samples_to_bins[i, current.feature]
-
+                    bin_indices[i] = samples_to_bins[i - start, current.feature]
 
                 sort(&Xf[start], &samples[start], end - start)
                 sort(&bin_indices[start], &dummy_samples[start], end - start)   # Todo: find a better way to do this
-                # sort(&Xf[start], &samples_to_bins[start], end - start) # Todo: maybe just leave as is??
 
                 if Xf[end - 1] <= Xf[start] + FEATURE_THRESHOLD:
                     features[f_j], features[n_total_constants] = features[n_total_constants], features[f_j]
@@ -942,9 +926,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 # Evaluate all splits
                 self.criterion.reset()
                 p = start
-
                 while p < end:
-                    # while p + 1 < end and Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD:
+                    #while p + 1 < end and Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD:
                     while p + 1 < end and bin_indices[p + 1] <= bin_indices[p]:
                         p += 1
 
@@ -964,6 +947,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                             ((end - current.pos) < min_samples_leaf)):
                         continue
 
+                    # move samples[pos:new_pos] to the left child
                     self.criterion.update(current.pos)
 
                     # Reject if min_weight_leaf is not satisfied
@@ -998,7 +982,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
                     else:
                         partition_end -= 1
-
                         samples[p], samples[partition_end] = samples[partition_end], samples[p]
 
                 self.criterion.reset()
@@ -1006,7 +989,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 self.criterion.children_impurity(&best.impurity_left,
                                                  &best.impurity_right)
                 best.improvement = self.criterion.impurity_improvement(
-                    impurity, best.impurity_left, best.impurity_right)
+                    impurity, best.impurity_left, best.impurity_right
+                )
 
             # Respect invariant for constant features: the original order of
             # element in features[:n_known_constants] must be preserved for sibling

@@ -26,7 +26,7 @@ def forest_digits_vanilla(seed):
     print("=> score: ", score)
 
 
-def tree_iris_vanilla(seed):
+def tree_iris_vanilla(seed, is_histogram):
     np.random.seed(seed)
     iris = load_iris()
 
@@ -37,17 +37,19 @@ def tree_iris_vanilla(seed):
     test_image = test_image.reshape((len(test_image), -1))
 
     # fitting tree
-    print("=> histogram")
-    tree = DecisionTreeClassifier(splitter="histogram", random_state=seed)
-    # tree = DecisionTreeClassifier()
-    tree.fit(train_image, train_target)
+    if is_histogram:
+        print("\n------ training tree WITH histogram ------")
+        tree = DecisionTreeClassifier(splitter="histogram", random_state=seed)
+    else:
+        print("\n------ training tree WITHOUT histogram ------")
+        tree = DecisionTreeClassifier(random_state=seed)
 
-    # testing tree
+    # fit and test tree
+    tree.fit(train_image, train_target)
     score = tree.score(test_image, test_target)
     print("=> score: ", score)
-    print("------ this is the end ------")
 
 
 if __name__ == "__main__":
-    tree_iris_vanilla(seed=0)
-    # forest_digits_vanilla(0)
+    tree_iris_vanilla(0, is_histogram=False); tree_iris_vanilla(0, is_histogram=True)
+    tree_iris_vanilla(1, is_histogram=False); tree_iris_vanilla(1, is_histogram=True)

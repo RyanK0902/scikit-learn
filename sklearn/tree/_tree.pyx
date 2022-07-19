@@ -197,7 +197,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
         cdef stack[StackRecord] builder_stack
         cdef StackRecord stack_record
-
+        cdef it = 0
         with nogil:
             # push root node onto stack
             builder_stack.push({
@@ -210,7 +210,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 "n_constant_features": 0})
 
             while not builder_stack.empty():
-                with gil: print("----ENTERING TREE LOOP----")
                 stack_record = builder_stack.top()
                 builder_stack.pop()
 
@@ -240,6 +239,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                     with gil:
                         # Todo: calling histogram_reset causes race conditions?
                         splitter.histogram_reset()
+                        #print("     ...this is the bin_ptr address {0:x}".format(<unsigned int>&bin_ptr))
                     splitter.node_split(impurity, &split, &n_constant_features)
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are
@@ -283,7 +283,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 if depth > max_depth_seen:
                     max_depth_seen = depth
-                with gil: print("----EXITING TREE LOOP----\n")
 
             if rc >= 0:
                 rc = tree._resize_c(tree.node_count)
