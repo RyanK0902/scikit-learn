@@ -66,6 +66,7 @@ DOUBLE = _tree.DOUBLE
 
 CRITERIA_CLF = {
     "gini": _criterion.Gini,
+    "hist_gini": _criterion.HistGini,
     "log_loss": _criterion.Entropy,
     "entropy": _criterion.Entropy,
 }
@@ -851,7 +852,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
 
     _parameter_constraints = {
         **BaseDecisionTree._parameter_constraints,
-        "criterion": [StrOptions({"gini", "entropy", "log_loss"}), Hidden(Criterion)],
+        "criterion": [StrOptions({"gini", "hist_gini", "entropy", "log_loss"}), Hidden(Criterion)],
         "class_weight": [dict, list, StrOptions({"balanced"}), None],
     }
 

@@ -19,15 +19,17 @@ from libc.string cimport memcpy
 from libc.string cimport memset
 
 import numpy as np
+import itertools
 
 from scipy.sparse import csc_matrix
 from ..ensemble._hist_gradient_boosting.binning import _BinMapper
+from .constants import *
 
 from ._utils cimport log
 from ._utils cimport rand_int
 from ._utils cimport rand_uniform
 from ._utils cimport RAND_R_MAX
-from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from libc.stdlib cimport rand, RAND_MAX
 
 cdef double INFINITY = np.inf
 
@@ -127,7 +129,6 @@ cdef class Splitter:
         # Create a new array which will be used to store nonzero
         # samples from the feature of interest
         self.samples = np.empty(n_samples, dtype=np.intp)
-        self.dummy_samples = np.empty(n_samples, dtype=np.intp)
         cdef SIZE_t[::1] samples = self.samples
 
         cdef SIZE_t i, j
@@ -146,6 +147,7 @@ cdef class Splitter:
                 weighted_n_samples += 1.0
 
         # Number of samples is number of positively weighted samples
+        # Number of samples is number of positively weighted samples
         self.n_samples = j
         self.weighted_n_samples = weighted_n_samples
 
@@ -154,14 +156,41 @@ cdef class Splitter:
         self.n_features = n_features
 
         self.feature_values = np.empty(n_samples, dtype=np.float32)
-        self.bin_indices = np.empty(n_samples, dtype=np.float32)
         self.constant_features = np.empty(n_features, dtype=np.intp)
 
         self.y = y
+
         self.sample_weight = sample_weight
+
+        # Todo: only call this when using histogram!!!
+        bin_mapper = _BinMapper(
+                     n_bins=NUM_BINS,
+                     is_categorical=None,
+                     known_categories=None,
+                     random_state=None,
+                     n_threads=None,
+        )
+        self.batch_binned_col = np.empty(BATCH_SIZE, dtype=np.float32)
+        self.X_binned = np.empty((j, n_features), dtype=np.float32)
+
+        cdef DTYPE_t[:,::1] X_binned = self.X_binned
+        cdef DTYPE_t[::1] X_row = np.empty(n_features, dtype=np.float32)
+
+        for i in range(j):
+            X_row = X[i]
+            X_binned[i] = X_row
+        _X_binned = bin_mapper.fit_transform(X_binned.base)
+        X_binned = np.ascontiguousarray(_X_binned, dtype=np.float32)
         return 0
 
-    cdef int histogram_reset(self) except -1:
+    cdef int _init_mab(self, double batch_size, double num_bins) except -1:
+        pass
+
+    cdef int sample_targets(self, SIZE_t[::1] population_idcs, SIZE_t[:,::1] valid_candidates,
+                                 SIZE_t[:,::1] estimates, SIZE_t[:,::1] cb_delta) nogil except -1:
+        pass
+
+    cdef int return_best_split(self, SIZE_t[:,::1] estimates) nogil except -1:
         pass
 
     cdef int node_reset(self, SIZE_t start, SIZE_t end,
@@ -559,7 +588,7 @@ cdef void heapsort(DTYPE_t* Xf, SIZE_t* samples, SIZE_t n) nogil:
 # Histogrammed version of BestSplitter
 ###############################################################################
 
-
+# Todo: make logic work for multiclass -> currently only works for binary class
 cdef class HistBestSplitter(BaseDenseSplitter):
     """Splitter for finding the best split."""
     def __reduce__(self):
@@ -569,33 +598,24 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                                self.min_weight_leaf,
                                self.random_state), self.__getstate__())
 
-    cdef int histogram_reset(self) except -1:
-        # print("=> ENTER: histogram_reset")
-        bin_mapper = _BinMapper(
-            n_bins=256,  # Todo: fix this hard coding
-            is_categorical=None,
-            known_categories=None,
-            random_state=self.rand_r_state,
-            n_threads=1
+
+    cdef int _init_mab(self, double batch_size, double num_bins) except -1:
+        # candidates.shape = (F*B, 2) -> each row corresponds to a (f,b) pair
+        self.candidates = np.array(
+            list(itertools.product(range(self.n_features), range(num_bins))),
+            dtype=np.intp
         )
-        cdef SIZE_t start = self.start
-        cdef SIZE_t end = self.end
-        self.samples_to_bins = np.empty((end - start, self.n_features), dtype=np.float32)
 
-        # print("     ...creating memoryview")
-        cdef DTYPE_t[:,::1] samples_to_bins = self.samples_to_bins
-        cdef DTYPE_t[::1] X_row = np.empty(self.n_features, dtype=np.float32)
-        cdef DTYPE_t[:,::1] X = self.X.copy()
+        self.batch_size = batch_size
+        self.accesses = np.ones(self.candidates.shape[0], dtype=np.intp)  # 1d array
 
-        # print("     ...filling up samples_to_bins")
-        for i in range(start, end):
-            X_row = X[self.samples[i]]
-            samples_to_bins[i - start] = X_row  # dimensions are dynamic depending on node
+        self.estimates = np.empty((self.n_features, num_bins), dtype=np.intp)
+        self.lcbs = np.empty((self.n_features, num_bins), dtype=np.intp)
+        self.ucbs = np.empty((self.n_features, num_bins), dtype=np.intp)
 
-        # print("     ...calling bin_mapper functions")
-        _samples_to_bins = bin_mapper.fit_transform(samples_to_bins)
-        samples_to_bins = np.ascontiguousarray(_samples_to_bins, dtype=np.float32)
-        # print("=> EXIT: histogram_reset")
+        self.cb_delta = np.zeros((self.n_features, num_bins), dtype=np.intp)
+        self.sample_count_arr = np.zeros((self.n_features, num_bins), dtype=np.int64)
+        self.exact_mask = np.zeros((self.n_features, num_bins), dtype=np.intp)
         return 0
 
     cdef int node_split(
@@ -611,7 +631,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         """
         # Find the best split
         cdef SIZE_t[::1] samples = self.samples
-        cdef SIZE_t[::1] dummy_samples = self.samples   # Todo: find a better way to do this
         cdef SIZE_t start = self.start
         cdef SIZE_t end = self.end
 
@@ -703,14 +722,15 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             # copying the values into an array and
             # sorting the array in a manner which utilizes the cache more
             # effectively.
+            # Todo: is Xf even needed? (i.e. should logic be executed with bin_indices only?)
             for i in range(start, end):
-                Xf[i] = self.X[samples[i], current.feature]
+                # Xf[i] = self.X[samples[i], current.feature]
                 bin_indices[i] = samples_to_bins[i - start, current.feature]
 
-            sort(&Xf[start], &samples[start], end - start)
-            sort(&bin_indices[start], &dummy_samples[start], end - start)   # Todo: find a better way to do this
+            #sort(&Xf[start], &samples[start], end - start)
+            sort(&bin_indices[start], &samples[start], end - start)
 
-            if Xf[end - 1] <= Xf[start] + FEATURE_THRESHOLD:
+            if bin_indices[end - 1] <= bin_indices[start]:
                 features[f_j], features[n_total_constants] = features[n_total_constants], features[f_j]
                 n_found_constants += 1
                 n_total_constants += 1
@@ -723,16 +743,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             self.criterion.reset()
             p = start
             while p < end:
-                #while p + 1 < end and Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD:
                 while p + 1 < end and bin_indices[p + 1] <= bin_indices[p]:
                     p += 1
 
-                # (p + 1 >= end) or (X[samples[p + 1], current.feature] >
-                #                    X[samples[p], current.feature])
                 p += 1
-                # (p >= end) or (X[samples[p], current.feature] >
-                #                X[samples[p - 1], current.feature])
-
                 if p >= end:
                     continue
 
@@ -743,6 +757,9 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                         ((end - current.pos) < min_samples_leaf)):
                     continue
 
+                # Update sum_left & sum_right by "moving" samples[pos:new_pos] to sum_left.
+                # This operation is valid since samples is sorted by feature value.
+                # Todo: how are feature values with the same bin thresholds moved?
                 self.criterion.update(current.pos)
 
                 # Reject if min_weight_leaf is not satisfied
@@ -755,14 +772,15 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 if current_proxy_improvement > best_proxy_improvement:
                     best_proxy_improvement = current_proxy_improvement
                     # sum of halves is used to avoid infinite value
-                    current.threshold = Xf[p - 1] / 2.0 + Xf[p] / 2.0
+                    # current.threshold = Xf[p - 1] / 2.0 + Xf[p] / 2.0
+                    current.threshold = bin_indices[p - 1] / 2.0 + bin_indices[p] / 2.0
 
                     if (
-                        current.threshold == Xf[p] or
+                        current.threshold == bin_indices[p] or
                         current.threshold == INFINITY or
                         current.threshold == -INFINITY
                     ):
-                        current.threshold = Xf[p - 1]
+                        current.threshold = bin_indices[p - 1]
 
                     best = current  # copy
 
@@ -772,12 +790,12 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             p = start
 
             while p < partition_end:
-                if self.X[samples[p], best.feature] <= best.threshold:
+                # if self.X[samples[p], best.feature] <= best.threshold:
+                if samples_to_bins[p - start, best.feature] <= best.threshold:
                     p += 1
 
                 else:
                     partition_end -= 1
-
                     samples[p], samples[partition_end] = samples[partition_end], samples[p]
 
             self.criterion.reset()
@@ -802,6 +820,78 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         n_constant_features[0] = n_total_constants
         return 0
 
+    cdef int sample_targets(
+            self,
+            int M, int batch_size,
+            DTYPE_t[:,::1] candidates, DTYPE_t[::1] accesses
+    ) nogil except -1:
+        cdef:
+            SIZE_t i
+            SIZE_t bin, curr_f
+            SIZE_t row = 0
+            SIZE_t num_rows = accesses.shape[0]
+
+            SIZE_t start = self.start
+            SIZE_t sample_i
+            SIZE_t[::1] samples = self.samples
+
+            DTYPE_t[::1] batch_binned_col = self.batch_binned_col
+            DTYPE_t[::1] batch_y
+
+            double impurity_curr = 0.0
+            double impurity_left = 0.0
+            double impurity_right = 0.0
+
+            double variance_curr = 0.0
+            double variance_left = 0.0
+            double variance_right = 0.0
+
+            SIZE_t[::1] samples_mask = self.samples_mask     # relevant indices also start, end
+            SIZE_t[::1] batch_idcs = self.batch_idcs
+
+            SIZE_t[:, ::1] estimates = self.estimates
+            SIZE_t[:, ::1] cb_delta = self.cb_delta
+
+
+        batch_idcs = get_batch_idcs(
+            M, batch_size, start, end,
+            batch_idcs, samples_mask
+        )
+        previous_f = curr_f
+        while row < num_rows:
+
+            # only get the valid candidates
+            if accesses[row] != 1:
+                continue
+
+            # we encountered a new feature -> update histogram
+            for i in range(batch_size):
+                sample_i = samples[batch_idcs[i]]
+                batch_binned_col[i] = self.X_binned[sample_i]
+                batch_y[i] = self.y[sample_i, 0]
+            self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
+            curr_f = candidates[row, 0]
+
+            # for each valid (f, b) pair, compute impurity reductions (proxy)
+            # -> analogous to get_impurity_reductions (in the python implementation) but for a single (f,b) pair
+            while curr_f == candidates[row, 0]:
+                bin = candidates[row, 1]
+                self.children_impurity(
+                    impurity_curr, impurity_left, impurity_right,  # location of the impurities
+                    variance_curr, variance_left, variance_right,  # location of the variances
+                    curr_f, bin                                    # current (f,b) pair
+                )
+
+                # update estimates and cb_deltas
+                estimates[curr_f, bin] = (impurity_left + impurity_right) - impurity_curr
+                cb_delta[curr_f, bin] = variance_curr + variance_left + variance_right
+                row += 1
+        return 0
+
+
+    cdef int return_best_split(self, SIZE_t[:,::1] estimates) nogil except -1:
+        pass
+
     cdef int mab_split(
                 self,
                 double impurity,
@@ -809,205 +899,163 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 SIZE_t* n_constant_features
             ) nogil except -1:
             """
-            Find the best split on node samples[start:end]
+            Find the best split on node samples[start:end] using MABSplit subroutine. 
+            Note that dynamic sizing of arrays is non-trivial with nogil (as opposed to the Python version).
+            The work-around is to allocate memory for the biggest possible case (usually size FxB) and keep smart
+            indices to maintain dynamic sizing. 
+            
             Returns -1 in case of failure to allocate memory (and raise MemoryError)
             or 0 otherwise.
             """
             # Find the best split
-            cdef SIZE_t[::1] samples = self.samples
-            cdef SIZE_t[::1] dummy_samples = self.samples   # Todo: find a better way to do this
+            cdef int n_samples = self.n_samples
             cdef SIZE_t start = self.start
             cdef SIZE_t end = self.end
-
-            cdef SIZE_t[::1] features = self.features
-            cdef SIZE_t[::1] constant_features = self.constant_features
-            cdef SIZE_t n_features = self.n_features
-
-
-            cdef DTYPE_t[::1] Xf = self.feature_values
-            cdef SIZE_t max_features = self.max_features
-            cdef SIZE_t min_samples_leaf = self.min_samples_leaf
-            cdef double min_weight_leaf = self.min_weight_leaf
-            cdef UINT32_t* random_state = &self.rand_r_state
 
             cdef SplitRecord best, current
             cdef double current_proxy_improvement = -INFINITY
             cdef double best_proxy_improvement = -INFINITY
 
-            cdef SIZE_t f_i = n_features
-            cdef SIZE_t f_j
-            cdef SIZE_t p
-            cdef SIZE_t feature_idx_offset
-            cdef SIZE_t feature_offset
-            cdef SIZE_t i
-            cdef SIZE_t j
-
-            cdef SIZE_t n_visited_features = 0
-            # Number of features discovered to be constant during the split search
-            cdef SIZE_t n_found_constants = 0
-            # Number of features known to be constant and drawn without replacement
-            cdef SIZE_t n_drawn_constants = 0
-            cdef SIZE_t n_known_constants = n_constant_features[0]
-            # n_total_constants = n_known_constants + n_found_constants
-            cdef SIZE_t n_total_constants = n_known_constants
-            cdef DTYPE_t current_feature_value
-            cdef SIZE_t partition_end
-
             _init_split(&best, end)
 
-            # initialize a bin array that maps samples to bin indices
-            cdef DTYPE_t[::1] bin_indices = self.bin_indices
-            cdef DTYPE_t[:,::1] samples_to_bins = self.samples_to_bins
+            # initialize relevant variables. Todo: fix this hard coding (default without_replacement, gini)
+            cdef double epsilon = 0.0
+            cdef double CONF_MULTIPLIER = 1.96
+            cdef double MIN_IMPURITY_DECREASE = 0.0
 
-            # Sample up to max_features without replacement using a
-            # Fisher-Yates-based algorithm (using the local variables `f_i` and
-            # `f_j` to compute a permutation of the `features` array).
-            #
-            # Skip the CPU intensive evaluation of the impurity criterion for
-            # features that were already detected as constant (hence not suitable
-            # for good splitting) by ancestor nodes and save the information on
-            # newly discovered constant features to spare computation on descendant
-            # nodes.
-            while (f_i > n_total_constants and  # Stop early if remaining features
-                                                # are constant
-                    (n_visited_features < max_features or
-                     # At least one drawn features must be non constant
-                     n_visited_features <= n_found_constants + n_drawn_constants)):
+            # access is information about the valid ROWS.
+            # Can't modify in-place since previously discarded candidates can be re-introduced.
+            cdef SIZE_t[::1] accesses = self.accesses
+            cdef SIZE_t[::1] accesses_mask = self.accesses_mask
 
-                n_visited_features += 1
+            # Values that are 1 in the mask are the valid candidates (initially all zero).
+            # All rows of constant features (known + found) are excluded from candidates.
+            cdef SIZE_t[:,::1] candidates = self.candidates
 
-                # Loop invariant: elements of features in
-                # - [:n_drawn_constant[ holds drawn and known constant features;
-                # - [n_drawn_constant:n_known_constant[ holds known constant
-                #   features that haven't been drawn yet;
-                # - [n_known_constant:n_total_constant[ holds newly found constant
-                #   features;
-                # - [n_total_constant:f_i[ holds features that haven't been drawn
-                #   yet and aren't constant apriori.
-                # - [f_i:n_features[ holds features that have been drawn
-                #   and aren't constant.
+            # Candidates can move from being excluded to included as the value of
+            # the estimates change with more samples (the min ucb gets larger).
+            cdef SIZE_t[:,::1] estimates = self.estimates
+            cdef SIZE_t[:,::1] lcbs = self.lcbs
+            cdef SIZE_t[:,::1] ucbs = self.ucbs
+            cdef SIZE_t[:,::1] cb_delta = self.cb_delta
+            cdef SIZE_t[:,::1] sample_count_arr = self.sample_count_arr
+            cdef SIZE_t[:,::1] exact_mask = self.exact_mask
 
-                # Draw a feature at random
-                f_j = rand_int(n_drawn_constants, f_i - n_found_constants,
-                               random_state)
+            # Start of the main looping logic:
+            # loop over valid candidates until only a critical number of candidates are left. Candidates are discarded
+            # if their lcb is greater than the smallest ucb (i.e. there's no overlap in confidence bounds).
+            cdef int it = 0
+            cdef int batch_size = self.batch_size
+            while get_sum(accesses) > 5:
 
-                if f_j < n_known_constants:
-                    # f_j in the interval [n_drawn_constants, n_known_constants[
-                    features[n_drawn_constants], features[f_j] = features[f_j], features[n_drawn_constants]
+                # we have drawn O(n) samples. Compute exactly from this point on
+                if batch_size * it > n_samples:
+                    lcbs = ucbs = estimates
+                    break
 
-                    n_drawn_constants += 1
-                    continue
-
-                # f_j in the interval [n_known_constants, f_i - n_found_constants[
-                f_j += n_found_constants
-                # f_j in the interval [n_total_constants, f_i[
-                current.feature = features[f_j]
-
-                # Sort samples along that feature; by
-                # copying the values into an array and
-                # sorting the array in a manner which utilizes the cache more
-                # effectively.
-                for i in range(start, end):
-                    Xf[i] = self.X[samples[i], current.feature]
-                    bin_indices[i] = samples_to_bins[i - start, current.feature]
-
-                sort(&Xf[start], &samples[start], end - start)
-                sort(&bin_indices[start], &dummy_samples[start], end - start)   # Todo: find a better way to do this
-
-                if Xf[end - 1] <= Xf[start] + FEATURE_THRESHOLD:
-                    features[f_j], features[n_total_constants] = features[n_total_constants], features[f_j]
-                    n_found_constants += 1
-                    n_total_constants += 1
-                    continue
-
-                f_i -= 1
-                features[f_i], features[f_j] = features[f_j], features[f_i]
-
-                # Evaluate all splits
-                self.criterion.reset()
-                p = start
-                while p < end:
-                    #while p + 1 < end and Xf[p + 1] <= Xf[p] + FEATURE_THRESHOLD:
-                    while p + 1 < end and bin_indices[p + 1] <= bin_indices[p]:
-                        p += 1
-
-                    # (p + 1 >= end) or (X[samples[p + 1], current.feature] >
-                    #                    X[samples[p], current.feature])
-                    p += 1
-                    # (p >= end) or (X[samples[p], current.feature] >
-                    #                X[samples[p - 1], current.feature])
-
-                    if p >= end:
-                        continue
-
-                    current.pos = p
-
-                    # Reject if min_samples_leaf is not guaranteed
-                    if (((current.pos - start) < min_samples_leaf) or
-                            ((end - current.pos) < min_samples_leaf)):
-                        continue
-
-                    # move samples[pos:new_pos] to the left child
-                    self.criterion.update(current.pos)
-
-                    # Reject if min_weight_leaf is not satisfied
-                    if ((self.criterion.weighted_n_left < min_weight_leaf) or
-                            (self.criterion.weighted_n_right < min_weight_leaf)):
-                        continue
-
-                    current_proxy_improvement = self.criterion.proxy_impurity_improvement()
-
-                    if current_proxy_improvement > best_proxy_improvement:
-                        best_proxy_improvement = current_proxy_improvement
-                        # sum of halves is used to avoid infinite value
-                        current.threshold = Xf[p - 1] / 2.0 + Xf[p] / 2.0
-
-                        if (
-                            current.threshold == Xf[p] or
-                            current.threshold == INFINITY or
-                            current.threshold == -INFINITY
-                        ):
-                            current.threshold = Xf[p - 1]
-
-                        best = current  # copy
-
-            # Reorganize into samples[start:best.pos] + samples[best.pos:end]
-            if best.pos < end:
-                partition_end = end
-                p = start
-
-                while p < partition_end:
-                    if self.X[samples[p], best.feature] <= best.threshold:
-                        p += 1
-
-                    else:
-                        partition_end -= 1
-                        samples[p], samples[partition_end] = samples[partition_end], samples[p]
-
-                self.criterion.reset()
-                self.criterion.update(best.pos)
-                self.criterion.children_impurity(&best.impurity_left,
-                                                 &best.impurity_right)
-                best.improvement = self.criterion.impurity_improvement(
-                    impurity, best.impurity_left, best.impurity_right
+                # Draw batch_size samples, insert histogram, and compute impurity & variance.
+                # sample_targets will modify samples_mask, estimates, and cb_delta using index broadcasting
+                self.sample_targets(
+                    (end - start) - batch_size * it,
+                    batch_size,
+                    candidates,
+                    accesses
                 )
 
-            # Respect invariant for constant features: the original order of
-            # element in features[:n_known_constants] must be preserved for sibling
-            # and child nodes
-            memcpy(&features[0], &constant_features[0], sizeof(SIZE_t) * n_known_constants)
+                # None of the CIs overlap with 0.
+                # We are confident that there is no possible impurity reduction.
+                if get_min(lcbs) > 0:
+                    break
 
-            # Copy newly found constant features
-            memcpy(&constant_features[n_known_constants],
-                   &features[n_known_constants],
-                   sizeof(SIZE_t) * n_found_constants)
+                # Discard candidates which is equivalent to updating accesses. One important condition is that arms
+                # need to be at least \epsilon distance apart or they'll always overlap and make us draw O(n) samples.
+                # Recall that previously discarded candidates could be re-introduced.
+                exact_mask = OR(exact_mask, LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates)))
+                accesses = update_accesses(
+                    AND_2d(
+                        AND_2d(
+                            EQUAL_TO(exact_mask, 0),
+                            LESS_THAN(lcbs, get_min(ucbs))
+                        ), LESS_THAN(lcbs, MIN_IMPURITY_DECREASE)
+                    )
+                )
+                it += 1
 
-            # Return values
-            split[0] = best
-            n_constant_features[0] = n_total_constants
-            return 0
+            # Todo: include logic to compute exactly after breaking???
+            return self.return_best_split(estimates)
+
+# Todo: define helper functions for mab_split.
+cdef inline int get_sum(SIZE_t[::1] arr) nogil:
+    pass
+
+cdef inline int get_min(SIZE_t[:,::1] arr) nogil:
+    pass
+
+cdef inline SIZE_t[::1] update_accesses(SIZE_t[:,::1] accesses) nogil:
+    # go from (F, B) to (FxB, 1) -> basically stacking rows on top of each other
+    pass
+
+cdef inline DTYPE_t[:,::1] broadcast(DTYPE_t[:,::1] arr, DTYPE_t[::1] indices, float update_val):
+    # Analogous to broadcasting logic implemented in numpy.
+    # If update_val != 0, do arr[indices] += update_val and return None. Otherwise, return arr[indices].
+    pass
+
+cdef inline SIZE_t[:,::1] get_valid_candidates(DTYPE_t[:,::1] candidates, DTYPE_t[::1] accesses) nogil:
+    pass
+
+cdef inline DTYPE_t[::1] get_batch_idcs(int M, SIZE_t batch_size, SIZE_t start, SIZE_t end,
+                                        SIZE_t[::1] batch_idcs, SIZE_t[::1] samples_mask):
+    idcs = (
+        np.arange(M, dtype=np.int64)
+        if batch_size >= M
+        else np.random.choice(M, batch_size, replace=False)
+    )
+
+    cdef SIZE_t batch_i = 0
+    cdef SIZE_t i = start
+
+    while i < end:
+        if samples_mask[i] == 1:
+            if idcs[batch_i] > 0:
+                idcs[batch_i] -= 1
+            else:
+                batch_idcs[batch_i] = i
+                batch_i += 1
+
+                if i + 1 >= end:
+                    break
+                idcs[batch_i] -= batch_i
+        i += 1
+    return batch_idcs
+                
 
 
+
+        
+
+
+
+    return idcs
+
+cdef inline DTYPE_t[::1] get_X_binned_col(feature_idx, start, end):
+    pass
+
+# Functions in capital letters are analogous to bitwise operations. These functions should be as efficient as
+# bitwise operations in Python. Todo: Does this mean we shouldn't be iterating over the entire array?
+cdef inline SIZE_t[:,::1] OR(SIZE_t[:,::1] lhs, SIZE_t[:,::1] rhs) nogil:
+    pass
+
+cdef inline SIZE_t[:,::1] AND_2d(SIZE_t[:,::1] lhs, SIZE_t[:,::1] rhs) nogil:
+    pass
+
+cdef inline SIZE_t[::1] AND_1d(SIZE_t[::1] lhs, SIZE_t[::1] rhs) nogil:
+    pass
+
+cdef inline SIZE_t[:,::1] EQUAL_TO(SIZE_t[:,::1] lhs, double scalar) nogil:
+    pass
+
+cdef inline SIZE_t[:,::1] LESS_THAN(SIZE_t[:,::1] lhs, double scalar) nogil:
+    pass
 
 cdef class RandomSplitter(BaseDenseSplitter):
     """Splitter for finding the best random split."""

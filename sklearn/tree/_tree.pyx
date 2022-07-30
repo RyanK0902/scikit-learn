@@ -236,10 +236,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 is_leaf = is_leaf or impurity <= EPSILON
 
                 if not is_leaf:
-                    with gil:
-                        # Todo: calling histogram_reset causes race conditions?
-                        splitter.histogram_reset()
-                        #print("     ...this is the bin_ptr address {0:x}".format(<unsigned int>&bin_ptr))
                     splitter.node_split(impurity, &split, &n_constant_features)
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are

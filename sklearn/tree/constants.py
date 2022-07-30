@@ -1,0 +1,3 @@
+
+NUM_BINS = 10
+BATCH_SIZE = 50

@@ -26,13 +26,13 @@ def forest_digits_vanilla(seed):
     print("=> score: ", score)
 
 
-def tree_iris_vanilla(seed, is_histogram):
+def tree_digits_vanilla(seed, is_histogram):
     np.random.seed(seed)
-    iris = load_iris()
+    digits = load_digits()
 
-    msk = np.random.rand(len(iris.data)) < 0.8
-    train_image, test_image = iris.data[msk].copy(), iris.data[~msk].copy()
-    train_target, test_target = iris.target[msk].copy(), iris.target[~msk].copy()
+    msk = np.random.rand(len(digits.data)) < 0.8
+    train_image, test_image = digits.data[msk].copy(), digits.data[~msk].copy()
+    train_target, test_target = digits.target[msk].copy(), digits.target[~msk].copy()
     train_image = train_image.reshape((len(train_image), -1))
     test_image = test_image.reshape((len(test_image), -1))
 
@@ -51,5 +51,5 @@ def tree_iris_vanilla(seed, is_histogram):
 
 
 if __name__ == "__main__":
-    tree_iris_vanilla(0, is_histogram=False); tree_iris_vanilla(0, is_histogram=True)
-    tree_iris_vanilla(1, is_histogram=False); tree_iris_vanilla(1, is_histogram=True)
+    tree_digits_vanilla(0, is_histogram=False)
+    tree_digits_vanilla(0, is_histogram=True)
