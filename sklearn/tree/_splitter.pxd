@@ -57,21 +57,24 @@ cdef class Splitter:
     cdef const DOUBLE_t[:, ::1] y
     cdef DOUBLE_t* sample_weight
 
-    cdef DTYPE_t[:,::1] X_binned         # Mappings of samples -> bins
-    cdef DTYPE_t[::1] batch_binned_col   # 1d column of samples_to_bins
+    cdef SIZE_t[:,::1] X_binned         # Mappings of samples -> bins
+    cdef SIZE_t[::1] batch_binned_col   # 1d column of samples_to_bins
 
-    # access is information about the valid ROWS.
+    # arrays needed for sampling
+    cdef SIZE_t batch_size
+    cdef SIZE_t[::1] batch_idcs
+
+    # access is information about the valid ROWS of candidates.
+    cdef SIZE_t[::1] samples_mask        # without replacement
     cdef SIZE_t[::1] accesses
-
-    # Todo: All rows of constant features (known + found) are excluded from candidates.
     cdef SIZE_t[:,::1] candidates
 
     # Candidates can move from being excluded to included as the value of
     # the estimates change with more samples (the min ucb gets larger).
-    cdef SIZE_t[:,::1] estimates
-    cdef SIZE_t[:,::1] lcbs
-    cdef SIZE_t[:,::1] ucbs
-    cdef SIZE_t[:,::1] cb_delta
+    cdef double[:,::1] estimates
+    cdef double[:,::1] lcbs
+    cdef double[:,::1] ucbs
+    cdef double[:,::1] cb_delta
     cdef SIZE_t[:,::1] sample_count_arr
     cdef SIZE_t[:,::1] exact_mask
 
@@ -95,12 +98,15 @@ cdef class Splitter:
     cdef int init(self, object X, const DOUBLE_t[:, ::1] y,
                   DOUBLE_t* sample_weight) except -1
 
-    cdef int _init_mab(self, double batch_size, double num_bins) except -1
+    cdef int _init_mab(self, SIZE_t batch_size, SIZE_t num_bins) except -1
 
-    cdef int sample_targets(self, SIZE_t[::1] population_idcs, SIZE_t[:,::1] valid_candidates,
-                                 SIZE_t[:,::1] estimates, SIZE_t[:,::1] cb_delta) nogil except -1
+    cdef int mab_split(self, SplitRecord* split) nogil except -1
 
-    cdef int return_best_split(self, SIZE_t[:,::1] estimates) nogil except -1
+    cdef int sample_targets(self, SIZE_t M, SIZE_t batch_size,
+                            SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
+                            double[:,::1] estimates, double[:,::1] cb_delta) nogil except -1
+
+    cdef int return_best_split(self, double[:,::1] estimates, SplitRecord* split) nogil except -1
 
     cdef int node_reset(self, SIZE_t start, SIZE_t end,
                         double* weighted_n_node_samples) nogil except -1
