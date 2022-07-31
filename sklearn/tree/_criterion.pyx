@@ -25,12 +25,15 @@ from scipy.special.cython_special cimport xlogy
 
 from ._utils cimport log
 from ._utils cimport WeightedMedianCalculator
-from .common import HISTOGRAM_DTYPE
-from ._criterion import hist_struct
-from .constants import *
+from ._criterion cimport hist_struct
+
+# define dtype needed to allocating memory for histograms with numpy -> equivalent to hist_struct
+from libc.stdlib cimport calloc
+from libc.stdint cimport uintptr_t
+cdef hist_struct HISTOGRAM
+HISTOGRAM_DTYPE = np.asarray(<hist_struct[:1]> (&HISTOGRAM)).dtype
 
 # EPSILON is used in the Poisson criterion
-
 cdef double EPSILON = 10 * np.finfo('double').eps
 
 cdef class Criterion:
@@ -200,18 +203,20 @@ cdef class Criterion:
     cdef int init_histograms(self, SIZE_t num_bins, SIZE_t n_features, SIZE_t n_classes) except -1:
         pass
 
-    cdef int hist_node_init(self) nogil except -1:
+    cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
+                  DOUBLE_t* sample_weight, double weighted_n_samples,
+                  SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1:
         pass
 
-    cdef int insert_histograms(self, SIZE_t feature_idx, SIZE_t batch_size,
+    cdef int insert_histograms(self, SIZE_t f, SIZE_t batch_size,
                                     SIZE_t[::1] bin_idcs, SIZE_t[::1] batch_y) nogil:
         pass
 
     cdef void get_impurity_reductions(
             self,
-            double * impurity_curr, double * impurity_left, double * impurity_right,
-            double * variance_curr, double * variance_left, double * variance_right,
-            SIZE_t f, SIZE_t bin
+            SIZE_t f, SIZE_t bin,
+            double * impurity_left, double * impurity_right,
+            double * variance_left, double * variance_right
     ) nogil:
         pass
 
@@ -245,31 +250,22 @@ cdef class ClassificationCriterion(Criterion):
 
         cdef SIZE_t k = 0
         cdef SIZE_t max_n_classes = 0
+        self.n_classes = np.empty(n_outputs, dtype=np.intp)
 
-        # TODO: make this pass in flags
-        cdef int hist_gini = 1
-        cdef SIZE_t num_bins = NUM_BINS
-        cdef n_features = 10   # TODO: HOW WILL WE GET THIS????
-        if hist_gini == 1:
-            self.init_histograms(num_bins, n_features, n_classes[0])
+        # For each target, set the number of unique classes in that target,
+        # and also compute the maximal stride of all targets
+        for k in range(n_outputs):
+            self.n_classes[k] = n_classes[k]
 
-        else:
-            self.n_classes = np.empty(n_outputs, dtype=np.intp)
+            if n_classes[k] > max_n_classes:
+                max_n_classes = n_classes[k]
 
-            # For each target, set the number of unique classes in that target,
-            # and also compute the maximal stride of all targets
-            for k in range(n_outputs):
-                self.n_classes[k] = n_classes[k]
+        self.max_n_classes = max_n_classes
 
-                if n_classes[k] > max_n_classes:
-                    max_n_classes = n_classes[k]
-
-            self.max_n_classes = max_n_classes
-
-            # Count labels for each output
-            self.sum_total = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
-            self.sum_left = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
-            self.sum_right = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
+        # Count labels for each output
+        self.sum_total = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
+        self.sum_left = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
+        self.sum_right = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
 
     def __reduce__(self):
         return (type(self),
@@ -310,37 +306,33 @@ cdef class ClassificationCriterion(Criterion):
         self.weighted_n_samples = weighted_n_samples
         self.weighted_n_node_samples = 0.0
 
-        # Todo: pass this in as a flag
+
         cdef SIZE_t i
         cdef SIZE_t p
         cdef SIZE_t k
         cdef SIZE_t c
         cdef DOUBLE_t w = 1.0
-        cdef int hist_gini = 1
-        if hist_gini == 1:
-            self.hist_node_init()
 
-        else:
+        for k in range(self.n_outputs):
+            memset(&self.sum_total[k, 0], 0, self.n_classes[k] * sizeof(double))
+
+        for p in range(start, end):
+            i = samples[p]
+
+            # w is originally set to be 1.0, meaning that if no sample weights
+            # are given, the default weight of each sample is 1.0
+            if sample_weight != NULL:
+                w = sample_weight[i]
+
+            # Count weighted class frequency for each target
             for k in range(self.n_outputs):
-                memset(&self.sum_total[k, 0], 0, self.n_classes[k] * sizeof(double))
+                c = <SIZE_t> self.y[i, k]
+                self.sum_total[k, c] += w
 
-            for p in range(start, end):
-                i = samples[p]
+            self.weighted_n_node_samples += w
 
-                # w is originally set to be 1.0, meaning that if no sample weights
-                # are given, the default weight of each sample is 1.0
-                if sample_weight != NULL:
-                    w = sample_weight[i]
-
-                # Count weighted class frequency for each target
-                for k in range(self.n_outputs):
-                    c = <SIZE_t> self.y[i, k]
-                    self.sum_total[k, c] += w
-
-                self.weighted_n_node_samples += w
-
-            # Reset to pos=start
-            self.reset()
+        # Reset to pos=start
+        self.reset()
         return 0
 
     cdef int reset(self) nogil except -1:
@@ -630,27 +622,34 @@ cdef class HistGini(ClassificationCriterion):
     Some notable changes is that we no longer update sum_total/left/right but maintain histograms left/right instead.
     Also, the output y is of shape (n, 1) instead of (n, k).
     """
-
     cdef int init_histograms(self, SIZE_t n_bins, SIZE_t n_features, SIZE_t n_classes) except -1:
         self.n_single_classes = n_classes
-        self.histograms = np.zeros(n_features, dtype=HISTOGRAM_DTYPE)
-        self.current_hist = np.zeros((1, n_classes), dtype=SIZE_t)
+        self.histograms = np.empty(n_features, dtype=HISTOGRAM_DTYPE)
 
         cdef:
-            SIZE_t i
-            SIZE_t* left_arr
-            SIZE[:, ::1] left_2d
-            hist_struct[:, ::1] histograms = self.histograms
+            SIZE_t f
+            hist_struct[::1] histograms
 
         # dynamically allocating the histograms per feature
         for f in range(n_features):
-            histograms[f].left = <SIZE_t *> calloc(n_bins * n_classes, sizeof(int))
-            histograms[f].right = <SIZE_t *> calloc(n_bins * n_classes, sizeof(int))
+            histograms[f].left = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
+            histograms[f].right = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
 
+        self.histograms = histograms
         return 0
 
+    cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
+                  DOUBLE_t* sample_weight, double weighted_n_samples,
+                  SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1:
+        self.y = y
+        self.sample_weight = sample_weight
+        self.samples = samples
+        self.start = start
+        self.end = end
+        self.n_node_samples = end - start
+        self.weighted_n_samples = weighted_n_samples
+        self.weighted_n_node_samples = 0.0
 
-    cdef int hist_node_init(self) nogil except -1:
         # resetting all changes by previous node
         self.pos = self.start
         self.weighted_n_left = 0.0
@@ -658,16 +657,18 @@ cdef class HistGini(ClassificationCriterion):
 
         cdef:
             SIZE_t f, b
-            SIZE_t[:, ::1] left, right
+            SIZE_t[:, ::1] left
+            SIZE_t[:, ::1] right
 
             SIZE_t n_bins = self.n_bins
-            SIZE_t n_classes = self.n_classes
+            SIZE_t n_classes = self.n_single_classes
             hist_struct[::1] histograms = self.histograms
 
         for f in range(self.n_features):
             # reset left, right histograms in the struct
-            left = <SIZE_t[:n_bins, :n_classes]> histograms[f].left
-            right = <SIZE_t[:n_bins, :n_classes]> histograms[f].right
+            with gil:
+                left = typecast(histograms[f].left, n_bins, n_classes)
+                right = typecast(histograms[f].right, n_bins, n_classes)
 
             for b in range(self.n_bins):
                 memset(&left[b, 0], 0, self.n_single_classes * sizeof(SIZE_t))
@@ -677,19 +678,24 @@ cdef class HistGini(ClassificationCriterion):
 
     cdef int insert_histograms(
             self,
-            SIZE_t feature_idx, SIZE_t batch_size,
+            SIZE_t f, SIZE_t batch_size,
             SIZE_t[::1] bin_idcs, SIZE_t[::1] batch_y
     ) nogil:
         cdef:
             SIZE_t i, lj, rj, cl, cr
             SIZE_t y, bin
 
-            SIZE_t n_bins = self.n_bins
-            SIZE_t n_classes = self.n_classes
-            hist_struct[::1] histograms = self.histograms
-            SIZE_t[:, ::1] left = <SIZE_t[:n_bins, :n_classes]> histograms[feature_idx].left
-            SIZE_t[:, ::1] right = <SIZE_t[:n_bins, :n_classes]> histograms[feature_idx].right
+            SIZE_t[:, ::1] left
+            SIZE_t[:, ::1] right
 
+            SIZE_t n_bins = self.n_bins
+            SIZE_t n_classes = self.n_single_classes
+            hist_struct[::1] histograms = self.histograms
+
+        # getting left and right histograms
+        with gil:
+            left = typecast(histograms[f].left, n_bins, n_classes)
+            right = typecast(histograms[f].right, n_bins, n_classes)
         for i in range(batch_size):
             y = batch_y[i]
             bin = bin_idcs[i]
@@ -703,38 +709,16 @@ cdef class HistGini(ClassificationCriterion):
                 right[bin, y] += 1
         return 0
 
-        """
-        # update bin_counts -> analogous to "hist" in python implementation
-        for bin in range(n_bins):
-            for i in range(batch_size):
-                if bin_idcs[i] == bin:
-                    bin_counts[bin, batch_y[i]] += 1
-
-        # update histograms left and right
-        for bin in range(n_bins):
-            # left
-            for j in range(bin, n_bins):
-                for c in range(n_classes):
-                    left[j, c] += bin_counts[j, c]
-
-            # right
-            for jj in range(bin):
-                for c in range(n_classes):
-                    right[jj, c] += bin_counts[jj, c]
-        """
-
     cdef void get_impurity_reductions(
         self,
-        double* impurity_curr,
+        SIZE_t f,
+        SIZE_t bin,
+
         double* impurity_left,
         double* impurity_right,
 
-        double* variance_curr,
         double* variance_left,
-        double* variance_right,
-
-        SIZE_t f,
-        SIZE_t bin
+        double* variance_right
     ) nogil:
         """Evaluate the impurity in children nodes.
 
@@ -765,16 +749,18 @@ cdef class HistGini(ClassificationCriterion):
             SIZE_t n_bins = self.n_bins
             SIZE_t n_node_samples = self.n_node_samples
 
-            object[::1] histograms = self.histograms
-            SIZE_t[:, ::1] left = <SIZE_t[:n_bins, :n_single_classes]> histograms[f].left
-            SIZE_t[:, ::1] right = <SIZE_t[:n_bins, :n_single_classes]> histograms[f].right
-            SIZE_t[:,::1] curr = self.current_hist
+            hist_struct[::1] histograms = self.histograms
+            SIZE_t[:, ::1] left
+            SIZE_t[:, ::1] right
+
+        # getting left, right histograms
+        with gil:
+            left = typecast(histograms[f].left, n_bins, n_single_classes)
+            right = typecast(histograms[f].right, n_bins, n_single_classes)
 
         # initialize relevant coefficients
         for i in range(n_single_classes):
-            curr[0, i] = left[0, i] + right[0, i]   # getting histograms for curr_impurity
-            n += curr[i, 0]
-
+            n += left[0, i] + right[0, i]
             left_sum += left[bin, i]
             right_sum += right[bin, i]
 
@@ -782,9 +768,38 @@ cdef class HistGini(ClassificationCriterion):
         right_weight = right_sum / n
 
         # get impurities and variances
-        get_gini(curr, zero_idx, n, 1.0, n_node_samples, n_single_classes, impurity_curr, variance_curr)
         get_gini(left, bin, left_sum, left_weight, n_node_samples, n_single_classes, impurity_left, variance_left)
         get_gini(right, bin, right_sum, right_weight, n_node_samples, n_single_classes, impurity_right, variance_right)
+
+    cdef double node_impurity(self) nogil:
+        """Evaluate the impurity of the current node.
+
+        Evaluate the Gini criterion as impurity of the current node,
+        i.e. the impurity of samples[start:end]. The smaller the impurity the
+        better.
+        """
+        cdef double gini = 0.0
+        cdef double sq_count
+        cdef double count_k
+        cdef SIZE_t k
+        cdef SIZE_t c
+
+        for k in range(self.n_outputs):
+            sq_count = 0.0
+
+            for c in range(self.n_classes[k]):
+                count_k = self.sum_total[k, c]
+                sq_count += count_k * count_k
+
+            gini += 1.0 - sq_count / (self.weighted_n_node_samples *
+                                      self.weighted_n_node_samples)
+
+        return gini / self.n_outputs
+
+cdef inline SIZE_t[:, ::1] typecast(uintptr_t ptr, SIZE_t n_bins, SIZE_t n_single_classes):
+    cdef SIZE_t* s_ptr = <SIZE_t *> ptr
+    cdef SIZE_t[:,::1] hist = <SIZE_t[:n_bins, :n_single_classes]> s_ptr
+    return hist
 
 
 cdef inline void get_gini(
@@ -822,7 +837,6 @@ cdef inline void get_gini(
     impurity[0] = weight * (1 - p_sq)
     variance[0] = weight * weight * v_g
     return
-
 
 
 cdef class RegressionCriterion(Criterion):

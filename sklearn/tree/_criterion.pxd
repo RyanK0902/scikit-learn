@@ -14,10 +14,11 @@ from ._tree cimport DOUBLE_t         # Type of y, sample_weight
 from ._tree cimport SIZE_t           # Type for indices and counters
 from ._tree cimport INT32_t          # Signed 32 bit integer
 from ._tree cimport UINT32_t         # Unsigned 32 bit integer
+from libc.stdint cimport uintptr_t
 
 cdef packed struct hist_struct:
-    SIZE_t* left
-    SIZE_t* right
+    uintptr_t left                   # uintptr_t is able to hold SIZE_t* ptr
+    uintptr_t right
 
 cdef class Criterion:
     # The criterion computes the impurity of a node and the reduction of
@@ -68,14 +69,16 @@ cdef class Criterion:
 
     # function placeholders for HistGini -> any other criteria doesn't use these
     cdef int init_histograms(self, SIZE_t num_bins, SIZE_t n_features, SIZE_t n_classes) except -1
-    cdef int hist_node_init(self) nogil except -1
-    cdef int insert_histograms(self, SIZE_t feature_idx, SIZE_t batch_size,
+    cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
+                  DOUBLE_t* sample_weight, double weighted_n_samples,
+                  SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1
+    cdef int insert_histograms(self, SIZE_t f, SIZE_t batch_size,
                                     SIZE_t[::1] bin_idcs, SIZE_t[::1] batch_y) nogil
     cdef void get_impurity_reductions(
             self,
-            double * impurity_curr, double * impurity_left,double * impurity_right,
-            double * variance_curr, double * variance_left, double * variance_right,
-            SIZE_t f, SIZE_t bin
+            SIZE_t f, SIZE_t bin,
+            double * impurity_left,double * impurity_right,
+            double * variance_left, double * variance_right,
     ) nogil
 
 cdef class ClassificationCriterion(Criterion):

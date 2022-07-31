@@ -33,7 +33,6 @@ cnp.import_array()
 from scipy.sparse import issparse
 from scipy.sparse import csr_matrix
 
-from .constants import *
 from ._utils cimport safe_realloc
 from ._utils cimport sizet_ptr_to_ndarray
 
@@ -200,12 +199,12 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef StackRecord stack_record
         cdef it = 0
 
-        cdef int is_histogram = 1
+        cdef bint is_histogram = 1
         cdef SIZE_t batch_size
         cdef SIZE_t num_bins
-        if is_histogram == 1:
-            batch_size = BATCH_SIZE
-            num_bins = NUM_BINS
+        if is_histogram:
+            batch_size = 50
+            num_bins = 10
             splitter._init_mab(batch_size, num_bins)
         with nogil:
             # push root node onto stack
@@ -231,17 +230,15 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 n_constant_features = stack_record.n_constant_features
 
                 n_node_samples = end - start
-                splitter.node_reset(start, end, &weighted_n_node_samples)
+                # splitter.node_reset(start, end, &weighted_n_node_samples)
+                splitter.node_reset(first, start, end, &weighted_n_node_samples)
                 is_leaf = (depth >= max_depth or
                            n_node_samples < min_samples_split or
                            n_node_samples < 2 * min_samples_leaf or
                            weighted_n_node_samples < 2 * min_weight_leaf)
 
                 if first:
-                    if is_histogram == 1:
-                        impurity = 0
-                    else:
-                        impurity = splitter.node_impurity()
+                    impurity = splitter.node_impurity()
                     first = 0
 
                 # impurity == 0 with tolerance due to rounding errors
@@ -475,7 +472,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef SIZE_t n_left, n_right
         cdef double imp_diff
 
-        splitter.node_reset(start, end, &weighted_n_node_samples)
+        splitter.node_reset(0, start, end, &weighted_n_node_samples)
 
         if is_first:
             impurity = splitter.node_impurity()

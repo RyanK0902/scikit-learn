@@ -28,6 +28,11 @@ cdef struct SplitRecord:
     double impurity_left   # Impurity of the left split.
     double impurity_right  # Impurity of the right split.
 
+cdef struct ArmRecord:
+    # data to track each estimates left, right impurities
+    double l_impurity
+    double r_impurity
+
 cdef class Splitter:
     # The splitter searches in the input space for a feature and a threshold
     # to split the samples samples[start:end].
@@ -58,6 +63,7 @@ cdef class Splitter:
     cdef DOUBLE_t* sample_weight
 
     cdef SIZE_t[:,::1] X_binned         # Mappings of samples -> bins
+    cdef double[:,::1] bin_thresholds     # Thresholds per feature
     cdef SIZE_t[::1] batch_binned_col   # 1d column of samples_to_bins
 
     # arrays needed for sampling
@@ -68,6 +74,14 @@ cdef class Splitter:
     cdef SIZE_t[::1] samples_mask        # without replacement
     cdef SIZE_t[::1] accesses
     cdef SIZE_t[:,::1] candidates
+
+    cdef SIZE_t[:,::1] temp1
+    cdef SIZE_t[:,::1] temp2
+    cdef SIZE_t[:,::1] temp3
+
+    # impurity left and right for each of the estimates
+    # -> need to avoid re-computations
+    cdef ArmRecord[:,::1] arm_records
 
     # Candidates can move from being excluded to included as the value of
     # the estimates change with more samples (the min ucb gets larger).
@@ -100,15 +114,17 @@ cdef class Splitter:
 
     cdef int _init_mab(self, SIZE_t batch_size, SIZE_t num_bins) except -1
 
-    cdef int mab_split(self, SplitRecord* split) nogil except -1
+    cdef int mab_split(self, double impurity, SplitRecord* split) nogil except -1
 
     cdef int sample_targets(self, SIZE_t M, SIZE_t batch_size,
                             SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
-                            double[:,::1] estimates, double[:,::1] cb_delta) nogil except -1
+                            double[:,::1] estimates, double[:,::1] cb_delta,
+                            ArmRecord[:,::1] arm_records) nogil except -1
 
-    cdef int return_best_split(self, double[:,::1] estimates, SplitRecord* split) nogil except -1
+    cdef int update_best_split(self, double impurity, double[:,::1] estimates,
+                                       ArmRecord[:,::1] arm_records, SplitRecord* split) except -1
 
-    cdef int node_reset(self, SIZE_t start, SIZE_t end,
+    cdef int node_reset(self, bint first, SIZE_t start, SIZE_t end,
                         double* weighted_n_node_samples) nogil except -1
 
     cdef int node_split(self,
