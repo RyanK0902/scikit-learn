@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.datasets import load_digits
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 
 def tree_mnist(seed, is_histogram):

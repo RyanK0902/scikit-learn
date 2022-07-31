@@ -267,6 +267,9 @@ cdef class ClassificationCriterion(Criterion):
         self.sum_left = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
         self.sum_right = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
 
+        # we're only using a single output in mab_split
+        self.n_single_classes = n_classes[0]
+
     def __reduce__(self):
         return (type(self),
                 (self.n_outputs, np.asarray(self.n_classes)), self.__getstate__())
@@ -623,7 +626,6 @@ cdef class HistGini(ClassificationCriterion):
     Also, the output y is of shape (n, 1) instead of (n, k).
     """
     cdef int init_histograms(self, SIZE_t n_bins, SIZE_t n_features, SIZE_t n_classes) except -1:
-        self.n_single_classes = n_classes
         self.histograms = np.empty(n_features, dtype=HISTOGRAM_DTYPE)
 
         cdef:

@@ -44,7 +44,7 @@ cdef class Criterion:
 
     cdef SIZE_t n_bins
     cdef SIZE_t n_features
-    cdef SIZE_t n_single_classes                # number of classes for the first target of y
+    cdef SIZE_t n_single_classes         # number of classes for the first target of y
     cdef hist_struct[::1] histograms
     cdef SIZE_t[:,::1] current_hist
 

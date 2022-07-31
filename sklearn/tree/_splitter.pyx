@@ -137,7 +137,7 @@ cdef class Splitter:
         self.samples = np.empty(n_samples, dtype=np.intp)
         cdef SIZE_t[::1] samples = self.samples
 
-        cdef SIZE_t i, j
+        cdef SIZE_t i, ii, j
         cdef double weighted_n_samples = 0.0
         j = 0
 
@@ -170,8 +170,11 @@ cdef class Splitter:
 
         # Todo: pass in histogram flag
         cdef bint is_histogram = 1
-        cdef SIZE_t[:,::1] X_binned
-        cdef SIZE_t[::1] X_row
+        cdef DTYPE_t[::1] X_row
+        cdef DTYPE_t[:,::1] X_binned_temp
+
+        cdef DOUBLE_t[::1] f_bin_threshold
+        cdef DOUBLE_t[:,::1] bin_thresholds
         if is_histogram:
             bin_mapper = _BinMapper(
                          n_bins=10,
@@ -180,22 +183,31 @@ cdef class Splitter:
                          random_state=None,
                          n_threads=None,
             )
-            # fill up X_binned and bin_thresholds
-            self.batch_binned_col = np.empty(50, dtype=np.intp)
-            self.X_binned = np.empty((j, n_features), dtype=np.intp)
-            self.bin_thresholds = np.empty((n_features, 10), dtype=np.float32)
 
-            X_binned = self.X_binned
-            X_row = np.empty(n_features, dtype=np.intp)
+            # fill up X_binned
+            X_binned_temp = np.empty((j, n_features), dtype=np.float32)
+            X_row = np.empty(n_features, dtype=np.float32)
 
             for i in range(j):
                 X_row = X[i]
-                X_binned[i] = X_row
-            _X_binned = bin_mapper.fit_transform(X_binned.base)
-            X_binned = np.ascontiguousarray(_X_binned, dtype=np.intp)
+                X_binned_temp[i] = X_row
+            _X_binned = bin_mapper.fit_transform(X_binned_temp.base)
+            self.X_binned = np.ascontiguousarray(_X_binned, dtype=np.uint8)
 
-            self.bin_thresholds = bin_mapper.bin_thresholds_
-            self.criterion.init_histograms(10, n_features, self.criterion.n_classes[0])
+            # fill in bin_thresholds.
+            # -> need to convert list[np.ndarray(dtype=np.float64)] to np.ndarray
+            bin_thresholds = np.empty((n_features, 10), dtype=np.float64)
+            for i in range(n_features):
+                f_bin_threshold = np.asarray(bin_mapper.bin_thresholds_[i])
+                for ii in range(10):
+                    bin_thresholds[i, ii] = f_bin_threshold[ii]
+            self.bin_thresholds = bin_thresholds
+
+            # batch_binned_col is used in sample_targets
+            self.batch_binned_col = np.empty(50, dtype=np.intp)
+
+            # initialize the histograms for all the features
+            self.criterion.init_histograms(10, n_features, self.criterion.n_single_classes)
         return 0
 
     cdef int _init_mab(self, SIZE_t batch_size, SIZE_t num_bins) except -1:
@@ -713,7 +725,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             # we encountered a new feature -> update histogram
             for i in range(batch_size):
                 sample_i = samples[batch_idcs[i]]
-                batch_binned_col[i] = self.X_binned[sample_i, curr_f]
+                batch_binned_col[i] = <SIZE_t> self.X_binned[sample_i, curr_f]
                 batch_y[i] = <SIZE_t> self.y[sample_i, 0]
             self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
             curr_f = candidates[row, 0]

@@ -16,6 +16,7 @@ from ._tree cimport DOUBLE_t         # Type of y, sample_weight
 from ._tree cimport SIZE_t           # Type for indices and counters
 from ._tree cimport INT32_t          # Signed 32 bit integer
 from ._tree cimport UINT32_t         # Unsigned 32 bit integer
+from ._tree cimport UINT8_t
 
 cdef struct SplitRecord:
     # Data to track sample split
@@ -62,9 +63,10 @@ cdef class Splitter:
     cdef const DOUBLE_t[:, ::1] y
     cdef DOUBLE_t* sample_weight
 
-    cdef SIZE_t[:,::1] X_binned         # Mappings of samples -> bins
-    cdef double[:,::1] bin_thresholds     # Thresholds per feature
-    cdef SIZE_t[::1] batch_binned_col   # 1d column of samples_to_bins
+    cdef UINT8_t[:,::1] X_binned         # Mappings of samples -> bins
+    cdef DOUBLE_t[:,::1] bin_thresholds  # Thresholds per feature
+    cdef SIZE_t[::1] batch_binned_col    # 1d column of samples_to_bins
+                                         # -> will be cast from np.uint8 to np.intp
 
     # arrays needed for sampling
     cdef SIZE_t batch_size
