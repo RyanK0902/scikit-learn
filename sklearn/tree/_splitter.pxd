@@ -118,7 +118,7 @@ cdef class Splitter:
 
     cdef int mab_split(self, double impurity, SplitRecord* split) nogil except -1
 
-    cdef int sample_targets(self, SIZE_t M, SIZE_t batch_size,
+    cdef int sample_targets(self, SIZE_t it, SIZE_t batch_size,
                             SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
                             double[:,::1] estimates, double[:,::1] cb_delta,
                             ArmRecord[:,::1] arm_records) nogil except -1

@@ -300,6 +300,8 @@ cdef class ClassificationCriterion(Criterion):
         end : SIZE_t
             The last sample to use in the mask
         """
+        # with gil: print("we hav enetered classificiation criteria init")
+
         self.y = y
         self.sample_weight = sample_weight
         self.samples = samples
@@ -633,7 +635,6 @@ cdef class HistGini(ClassificationCriterion):
             hist_struct[::1] histograms = self.histograms
 
         # dynamically allocating the histograms per feature
-        print("     ... initializing histograms")
         for f in range(n_features):
             histograms[f].left = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
             histograms[f].right = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
@@ -779,6 +780,8 @@ cdef class HistGini(ClassificationCriterion):
         i.e. the impurity of samples[start:end]. The smaller the impurity the
         better.
         """
+        # with gil: print("we have entered hist_gini's node impurity")
+
         cdef double gini = 0.0
         cdef double sq_count
         cdef double count_k

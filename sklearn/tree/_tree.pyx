@@ -175,7 +175,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef double min_impurity_decrease = self.min_impurity_decrease
 
         # Recursive partition (without actual recursion)
-        print("=> splitter.init --> initializes the bins and allocates histograms (init_histograms)")
         splitter.init(X, y, sample_weight_ptr)
 
         cdef SIZE_t start
@@ -206,7 +205,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         if is_histogram:
             batch_size = 50
             num_bins = 10
-            #print("=> init_mab --> initializes datastructure for mab_split")
+            print("=> Building Tree")
             splitter._init_mab(batch_size, num_bins)
         with nogil:
             # push root node onto stack
@@ -219,8 +218,6 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 "impurity": INFINITY,
                 "n_constant_features": 0})
 
-            with gil:
-                print("=> start of main loop")
             while not builder_stack.empty():
                 stack_record = builder_stack.top()
                 builder_stack.pop()
@@ -236,7 +233,8 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 n_node_samples = end - start
                 # splitter.node_reset(start, end, &weighted_n_node_samples)
                 with gil:
-                    print('     => node_reset --> zeros out histograms with memset (hist_node_init)')
+                    print("     => Creating Node")
+                    print("         ... calling node_reset")
                 splitter.node_reset(first, start, end, &weighted_n_node_samples)
                 is_leaf = (depth >= max_depth or
                            n_node_samples < min_samples_split or
@@ -252,7 +250,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 if not is_leaf:
                     with gil:
-                        print('     => node_split --> calls mab_split')
+                        print("         ... calling node_split")
                     splitter.node_split(impurity, &split, &n_constant_features)
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are

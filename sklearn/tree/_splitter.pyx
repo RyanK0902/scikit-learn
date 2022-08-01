@@ -176,7 +176,6 @@ cdef class Splitter:
         cdef DOUBLE_t[::1] f_bin_threshold
         cdef DOUBLE_t[:,::1] bin_thresholds
         if is_histogram:
-            print("     ... initializing bins")
             bin_mapper = _BinMapper(
                          n_bins=10,
                          is_categorical=None,
@@ -217,7 +216,7 @@ cdef class Splitter:
     cdef int mab_split(self, double impurity, SplitRecord * split) nogil except -1:
         pass
 
-    cdef int sample_targets(self, SIZE_t M, SIZE_t batch_size,
+    cdef int sample_targets(self, SIZE_t it, SIZE_t batch_size,
                             SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
                             double[:,::1] estimates, double[:,::1] cb_delta,
                             ArmRecord[:,::1] arm_records) nogil except -1:
@@ -253,7 +252,8 @@ cdef class Splitter:
                                 start,
                                 end)
 
-        self.criterion.hist_node_init(self.y,
+        else:
+            self.criterion.hist_node_init(self.y,
                                 self.sample_weight,
                                 self.weighted_n_samples,
                                 &self.samples[0],
@@ -650,6 +650,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
         self.batch_size = batch_size
         self.batch_idcs = np.empty(batch_size, dtype=np.intp)
+        self.samples_mask = np.empty(self.n_samples, dtype=np.intp)
         self.accesses = np.ones(self.candidates.shape[0], dtype=np.intp)  # 1d array
 
         self.temp1 = np.empty((self.n_features, num_bins), dtype=np.intp)
@@ -681,16 +682,16 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
     cdef int sample_targets(
             self,
-            SIZE_t M, SIZE_t batch_size,
+            SIZE_t it, SIZE_t batch_size,
             SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
             double[:,::1] estimates, double[:,::1] cb_delta,
             ArmRecord[:,::1] arm_records
     ) nogil except -1:
+        with gil: print("               ENTER: sample_targets")
         cdef:
             SIZE_t i
             SIZE_t bin, curr_f
             SIZE_t row = 0
-            SIZE_t num_rows = accesses.shape[0]
 
             SIZE_t start = self.start
             SIZE_t end = self.end
@@ -708,28 +709,37 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             double variance_left = 0.0
             double variance_right = 0.0
 
-            SIZE_t[::1] samples_mask = self.samples_mask     # relevant indices also start, end
-            SIZE_t[::1] batch_idcs = self.batch_idcs
 
-        with gil:   # Todo: how detrimental is this to runtime??
-            batch_idcs = get_batch_idcs(
-                M, batch_size, start, end,
-                batch_idcs, samples_mask
-            )
+            # batch_idcs is an array of sample indices that we will be subsampling
+            SIZE_t[::1] batch_idcs = self.batch_idcs
+        with gil: print("                 ...created memoryviews")
+
+        get_batch_idcs(
+            batch_size, start, end, it,
+            batch_idcs, samples,
+        )
+        with gil:
+            print("                 ...got batch_idcs")
+            print("start, end: ", (start, end))
+            print("indices \n", np.asarray(batch_idcs))
+
         previous_f = curr_f
-        while row < num_rows:
+        while row < accesses.shape[0]:
 
             # only get the valid candidates
-            if accesses[row] != 1:
+            if accesses[row] == 0:
+                row += 1
                 continue
 
-            # we encountered a new feature -> update histogram
+            # We encountered a new feature -> update histogram
+            # batch_binned_col and batch_y are 1d arrays of size batch_size (relevant indices [0, batch_size + diff])
             for i in range(batch_size):
-                sample_i = samples[batch_idcs[i]]
+                sample_i = batch_idcs[i]
                 batch_binned_col[i] = <SIZE_t> self.X_binned[sample_i, curr_f]
                 batch_y[i] = <SIZE_t> self.y[sample_i, 0]
             self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
             curr_f = candidates[row, 0]
+            with gil: print("                 ...insert histograms for one feature")
 
             # for each valid (f, b) pair, compute impurity reductions (proxy)
             # -> analogous to get_impurity_reductions (in the python implementation) but for a single (f,b) pair
@@ -747,7 +757,9 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     arm_records[curr_f, bin].r_impurity = impurity_right
                     estimates[curr_f, bin] = impurity_left + impurity_right
                     cb_delta[curr_f, bin] = variance_left + variance_right
+                    with gil: print("                 ...computed one (f,b) pair")
                 row += 1
+        with gil: print("               EXIT: sample_targets")
         return 0
 
 
@@ -788,6 +800,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             Returns -1 in case of failure to allocate memory (and raise MemoryError)
             or 0 otherwise.
             """
+            with gil: print("           ENTER: mab_split")
             # Find the best split
             cdef int n_samples = self.n_samples
             cdef SIZE_t[::1] samples = self.samples
@@ -834,8 +847,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             cdef SIZE_t f, b, row
             cdef SIZE_t it = 0
             cdef SIZE_t batch_size = self.batch_size
-            while get_sum(accesses) > 5:
 
+            while get_sum(accesses) > 5:
                 # we have drawn O(n) samples. Compute exactly from this point on
                 if batch_size * it > n_samples:
                     lcbs = ucbs = estimates
@@ -844,7 +857,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 # Draw batch_size samples, insert histogram, and compute impurity & variance.
                 # sample_targets will modify samples_mask, estimates, and cb_delta using index broadcasting
                 self.sample_targets(
-                    (end - start) - batch_size * it, batch_size,
+                    it, batch_size,
                     candidates, accesses,
                     estimates, cb_delta,
                     arm_records
@@ -896,6 +909,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 else:
                     partition_end -= 1
                     samples[p], samples[partition_end] = samples[partition_end], samples[p]
+            with gil: print("           EXIT: mab_split")
             return 0
 
 # Todo: define helper functions for mab_split.
@@ -926,30 +940,26 @@ cdef inline int update_accesses(SIZE_t[::1] accesses, SIZE_t[:,::1] arr) nogil:
     return 0
 
 
-cdef inline SIZE_t[::1] get_batch_idcs(SIZE_t M, SIZE_t batch_size, SIZE_t start, SIZE_t end,
-                                        SIZE_t[::1] batch_idcs, SIZE_t[::1] samples_mask):
-    idcs = (
-        np.arange(M, dtype=np.int64)
-        if batch_size >= M
-        else np.random.choice(M, batch_size, replace=False)
-    )
+cdef inline void get_batch_idcs(SIZE_t batch_size, SIZE_t start, SIZE_t end, SIZE_t it,
+                                        SIZE_t[::1] batch_idcs, SIZE_t[::1] samples) nogil:
+    cdef SIZE_t M = (end - start) - it * batch_size + 1
+    cdef SIZE_t i = 0
+    cdef SIZE_t sample_i
 
-    cdef SIZE_t batch_i = 0
-    cdef SIZE_t i = start
+    # if we don't at least have batch_size samples left
+    if M < batch_size:
+        while i < M:
+            sample_i = start + i
+            batch_idcs[i] = samples[sample_i]
+        return
 
-    while i < end:
-        if samples_mask[i] == 1:
-            if idcs[batch_i] > 0:
-                idcs[batch_i] -= 1
-            else:
-                batch_idcs[batch_i] = i
-                batch_i += 1
-
-                if i + 1 >= end:
-                    break
-                idcs[batch_i] -= batch_i
+    while i < batch_size:
+        sample_i = <SIZE_t> (rand() * M / float(RAND_MAX))
+        batch_idcs[i] = samples[start + sample_i]
+        samples[end - i], samples[start + sample_i] = samples[start + sample_i], samples[end - i]
         i += 1
-    return batch_idcs
+        M -= 1
+    return
 
 
 # Functions in capital letters are analogous to bitwise operations. These functions should be as efficient as
