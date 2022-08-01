@@ -71,6 +71,7 @@ cdef class Splitter:
     # arrays needed for sampling
     cdef SIZE_t batch_size
     cdef SIZE_t[::1] batch_idcs
+    cdef SIZE_t[::1] batch_y
 
     # access is information about the valid ROWS of candidates.
     cdef SIZE_t[::1] samples_mask        # without replacement
