@@ -176,6 +176,7 @@ cdef class Splitter:
         cdef DOUBLE_t[::1] f_bin_threshold
         cdef DOUBLE_t[:,::1] bin_thresholds
         if is_histogram:
+            print("     ... initializing bins")
             bin_mapper = _BinMapper(
                          n_bins=10,
                          is_categorical=None,

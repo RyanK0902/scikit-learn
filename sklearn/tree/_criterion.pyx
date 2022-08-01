@@ -630,14 +630,13 @@ cdef class HistGini(ClassificationCriterion):
 
         cdef:
             SIZE_t f
-            hist_struct[::1] histograms
+            hist_struct[::1] histograms = self.histograms
 
         # dynamically allocating the histograms per feature
+        print("     ... initializing histograms")
         for f in range(n_features):
             histograms[f].left = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
             histograms[f].right = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
-
-        self.histograms = histograms
         return 0
 
     cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
