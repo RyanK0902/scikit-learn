@@ -700,7 +700,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             SIZE_t[::1] samples = self.samples
 
             SIZE_t[::1] batch_binned_col = self.batch_binned_col
-            SIZE_t[::1] batch_idcs = self.batch_idcs
+            SIZE_t[::1] batch_idcs = self.batch_idcs  #jay: memory alloc?
             SIZE_t[::1] batch_y = self.batch_y
 
             double impurity_curr = 0.0
@@ -718,7 +718,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             batch_idcs, samples,
         )
         for i in range(batch_size):
-            batch_y[i] = <SIZE_t> self.y[batch_idcs[i], 0]
+            batch_y[i] = <SIZE_t> self.y[batch_idcs[i], 0]  #Jay: Is this a 2d array?
 
         # iterate over the candidates and compute impurity reductions by updating the histograms
         # -> insert histograms for valid features, compute impurity for the feature's bins, and update the impurities
@@ -733,7 +733,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             curr_f = candidates[row, 0]
             for i in range(batch_size):
                 batch_binned_col[i] = <SIZE_t> self.X_binned[batch_idcs[i], curr_f]
-            self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
+            self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)  #Jay: If we
+            # have (0, 0), (0, 1) for example, then we have to insert batch_binned_col to 0th feature histogram
+            # one time, but we're inserting two times in this case.
+
             # with gil: print("                 ...inserted histograms for feature idx ", curr_f)
 
             # for each valid (f, b) pair, compute impurity reductions (proxy)
@@ -751,7 +754,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     arm_records[curr_f, bin].l_impurity = impurity_left
                     arm_records[curr_f, bin].r_impurity = impurity_right
                     estimates[curr_f, bin] = impurity_left + impurity_right
-                    cb_delta[curr_f, bin] = variance_left + variance_right
+                    cb_delta[curr_f, bin] = variance_left + variance_right  #Jay: Square root of variance
                     #with gil: print("                 ...computed one (f,b) pair")
                 row += 1
             # with gil: print("                 ...computed impurity for valid bins of feature idx ", curr_f)
@@ -891,7 +894,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 with gil: print("               ...update masks")
                 exact_mask = OR(
                     exact_mask,
-                    LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates), temp1)
+                    LESS_THAN(estimates, (1 - epsilon) * get_min(estimates), temp1)
                 )
                 update_accesses(
                     accesses,

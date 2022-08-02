@@ -16,7 +16,7 @@ def tree_mnist(seed, is_histogram):
     # fitting tree
     if is_histogram:
         print("\n------ training tree WITH histogram ------")
-        tree = DecisionTreeClassifier(splitter="histogram", criterion="hist_gini", random_state=seed)
+        tree = DecisionTreeClassifier(splitter="histogram", criterion="hist_gini", random_state=seed, max_depth=5)
     else:
         print("\n------ training tree WITHOUT histogram ------")
         tree = DecisionTreeClassifier(random_state=seed)
