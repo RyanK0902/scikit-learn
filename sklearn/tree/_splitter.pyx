@@ -797,7 +797,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             Returns -1 in case of failure to allocate memory (and raise MemoryError)
             or 0 otherwise.
             """
-            with gil: print("           ENTER: mab_split")
+            with gil: print("\n           ENTER: mab_split")
             # Find the best split
             cdef int n_samples = self.n_samples
             cdef SIZE_t[::1] samples = self.samples
@@ -916,7 +916,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     else:
                         partition_end -= 1
                         samples[p], samples[partition_end] = samples[partition_end], samples[p]
-                with gil: print("           EXIT: mab_split")
+                        
+            with gil: print("           EXIT: mab_split\n")
             return 0
 
 # Todo: define helper functions for mab_split.
