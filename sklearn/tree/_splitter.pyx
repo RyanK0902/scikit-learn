@@ -691,13 +691,12 @@ cdef class HistBestSplitter(BaseDenseSplitter):
     ) nogil except -1:
         with gil: print("               ENTER: sample_targets")
         cdef:
-            SIZE_t i
+            SIZE_t i, sample_i
             SIZE_t bin, curr_f
             SIZE_t row = 0
 
             SIZE_t start = self.start
             SIZE_t end = self.end
-            SIZE_t sample_i
             SIZE_t[::1] samples = self.samples
 
             SIZE_t[::1] batch_binned_col = self.batch_binned_col
@@ -712,13 +711,17 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             double variance_left = 0.0
             double variance_right = 0.0
 
-        with gil: print("                 ...get batch_idcs")
+        with gil: print("                 ...get batch_idcs and batch_y")
+        # batch_idcs and batch_y are invariants for a single call to sample_targets
         get_batch_idcs(
             batch_size, start, end, it,
             batch_idcs, samples,
         )
+        for i in range(batch_size):
+            batch_y[i] = <SIZE_t> self.y[batch_idcs[i], 0]
 
-        previous_f = curr_f
+        # iterate over the candidates and compute impurity reductions by updating the histograms
+        # -> insert histograms for valid features, compute impurity for the feature's bins, and update the impurities
         while row < accesses.shape[0]:
 
             # only get the valid candidates
@@ -726,18 +729,12 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 row += 1
                 continue
 
-            # We encountered a new feature -> update histogram
-            # batch_binned_col and batch_y are 1d arrays of size batch_size (relevant indices [0, batch_size + diff])
-            with gil:
-                for i in range(batch_size):
-                    print("this is i", i)
-                    sample_i = batch_idcs[i]
-                    batch_binned_col[i] = <SIZE_t> self.X_binned[sample_i, curr_f]
-                    batch_y[i] = <SIZE_t> self.y[sample_i, 0]
-
-            self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
+            # We've encountered a valid feature -> update it's histograms
             curr_f = candidates[row, 0]
-            with gil: print("                 ...insert histograms for feature idx ", curr_f)
+            for i in range(batch_size):
+                batch_binned_col[i] = <SIZE_t> self.X_binned[batch_idcs[i], curr_f]
+            self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
+            # with gil: print("                 ...inserted histograms for feature idx ", curr_f)
 
             # for each valid (f, b) pair, compute impurity reductions (proxy)
             # -> analogous to get_impurity_reductions (in the python implementation) but for a single (f,b) pair
@@ -755,8 +752,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     arm_records[curr_f, bin].r_impurity = impurity_right
                     estimates[curr_f, bin] = impurity_left + impurity_right
                     cb_delta[curr_f, bin] = variance_left + variance_right
-                    with gil: print("                 ...computed one (f,b) pair")
+                    #with gil: print("                 ...computed one (f,b) pair")
                 row += 1
+            # with gil: print("                 ...computed impurity for valid bins of feature idx ", curr_f)
+
         with gil: print("               EXIT: sample_targets")
         return 0
 
@@ -848,65 +847,65 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             cdef SIZE_t f, b, row
             cdef SIZE_t it = 0
             cdef SIZE_t batch_size = self.batch_size
-            with gil:
-                print("num features is ", self.n_features)
-                while get_sum(accesses) > 5:
-                    # we have drawn O(n) samples. Compute exactly from this point on
-                    if batch_size * it > n_samples:
-                        lcbs = ucbs = estimates
-                        break
 
-                    # Draw batch_size samples, insert histogram, and compute impurity & variance.
-                    # sample_targets will modify samples_mask, estimates, and cb_delta using index broadcasting
-                    self.sample_targets(
-                        it, batch_size,
-                        candidates, accesses,
-                        estimates, cb_delta,
-                        arm_records
-                    )
+            while get_sum(accesses) > 5:
+                # we have drawn O(n) samples. Compute exactly from this point on
+                if batch_size * it > n_samples:
+                    lcbs = ucbs = estimates
+                    break
 
-                    # update confidence bounds
-                    print("               ...update confidence bounds")
-                    row = 0
-                    while row < accesses.shape[0]:
+                # Draw batch_size samples, insert histogram, and compute impurity & variance.
+                # sample_targets will modify samples_mask, estimates, and cb_delta using index broadcasting
+                self.sample_targets(
+                    it, batch_size,
+                    candidates, accesses,
+                    estimates, cb_delta,
+                    arm_records
+                )
 
-                        if accesses[row] != 1:
-                            row += 1
-                            continue
+                # update confidence bounds
+                with gil: print("               ...update confidence bounds")
+                row = 0
+                while row < accesses.shape[0]:
 
-                        f = candidates[row][0]
-                        b = candidates[row][1]
-                        lcbs[f, b] = estimates[f, b] - CONF_MULTIPLIER * cb_delta[f, b]
-                        ucbs[f, b] = estimates[f, b] + CONF_MULTIPLIER * cb_delta[f, b]
+                    if accesses[row] != 1:
                         row += 1
+                        continue
+
+                    f = candidates[row][0]
+                    b = candidates[row][1]
+                    lcbs[f, b] = estimates[f, b] - CONF_MULTIPLIER * cb_delta[f, b]
+                    ucbs[f, b] = estimates[f, b] + CONF_MULTIPLIER * cb_delta[f, b]
+                    row += 1
 
 
-                    # None of the CIs overlap with 0.
-                    # We are confident that there is no possible impurity reduction.
-                    #print("...")
-                    if get_min(lcbs) > 0:
-                        break
+                # None of the CIs overlap with 0.
+                # We are confident that there is no possible impurity reduction.
+                #print("...")
+                if get_min(lcbs) > 0:
+                    break
 
-                    # Discard candidates which is equivalent to updating accesses. One important condition is that arms
-                    # need to be at least \epsilon distance apart or they'll always overlap and make us draw O(n) samples.
-                    # Recall that previously discarded candidates could be re-introduced.
-                    print("               ...update masks")
-                    exact_mask = OR(
-                        exact_mask,
-                        LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates), temp1)
-                    )
-                    update_accesses(
-                        accesses,
+                # Discard candidates which is equivalent to updating accesses. One important condition is that arms
+                # need to be at least \epsilon distance apart or they'll always overlap and make us draw O(n) samples.
+                # Recall that previously discarded candidates could be re-introduced.
+                with gil: print("               ...update masks")
+                exact_mask = OR(
+                    exact_mask,
+                    LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates), temp1)
+                )
+                update_accesses(
+                    accesses,
+                    AND_2d(
+                        LESS_THAN(lcbs, MIN_IMPURITY_DECREASE, temp2),
                         AND_2d(
-                            LESS_THAN(lcbs, MIN_IMPURITY_DECREASE, temp2),
-                            AND_2d(
-                                EQUAL_TO(exact_mask, 0),
-                                LESS_THAN(lcbs, get_min(ucbs), temp3)
-                            )
+                            EQUAL_TO(exact_mask, 0),
+                            LESS_THAN(lcbs, get_min(ucbs), temp3)
                         )
                     )
-                    it += 1
-                    # Todo: add with gil
+                )
+                it += 1
+
+                with gil:
                     self.update_best_split(impurity, estimates, arm_records, split)
 
                 # Reorganize into samples[start:best.pos] + samples[best.pos:end]
@@ -956,7 +955,6 @@ cdef inline void get_batch_idcs(SIZE_t batch_size, SIZE_t start, SIZE_t end, SIZ
 
     # if we don't at least have batch_size samples left
     if M < batch_size:
-        with gil: print("we are in here")
         while i < M:
             sample_i = start + i
             batch_idcs[i] = samples[sample_i]

@@ -837,14 +837,16 @@ cdef inline void get_gini(
         variance[0] = 0.0
         return
 
-    cdef double p_end = 2 * histogram[bin, n_single_classes] / n
+    cdef double p_end = 2 * histogram[bin, n_single_classes - 1] / n
     for c in range(n_single_classes):
+        # compute impurity -> size n_single_classes
         p += histogram[bin, c] / n
         p_sq += (p * p)
 
-        if c == n_single_classes:
+        if c == n_single_classes - 1:
             break
 
+        # compute variance -> size n_single_classes - 1
         v_p = (p * (1 - p) * (pop_size - n)) / (n * (pop_size - 1))
         dG_dp = -2 * p + p_end
         v_g += dG_dp * dG_dp * v_p
