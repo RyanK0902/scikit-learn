@@ -168,6 +168,8 @@ cdef class Splitter:
 
         self.sample_weight = sample_weight
 
+        self.erase_this = np.empty(10, dtype=np.intp)
+
         # Todo: pass in histogram flag
         cdef bint is_histogram = 1
         cdef DTYPE_t[::1] X_row
@@ -204,8 +206,8 @@ cdef class Splitter:
             self.bin_thresholds = bin_thresholds
 
             # batch_binned_col is used in sample_targets
-            self.batch_binned_col = np.empty(50, dtype=np.intp)
-            self.batch_idcs = np.empty(50, dtype=np.intp)
+            self.batch_binned_col = np.empty(self.batch_size, dtype=np.intp)
+            self.batch_idcs = np.empty(self.batch_size, dtype=np.intp)
 
             # initialize the histograms for all the features
             self.criterion.n_bins = 10
@@ -689,7 +691,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             double[:,::1] estimates, double[:,::1] cb_delta,
             ArmRecord[:,::1] arm_records
     ) nogil except -1:
-        with gil: print("               ENTER: sample_targets")
+        #with gil: print("\n               ENTER: sample_targets")
         cdef:
             SIZE_t i, sample_i
             SIZE_t bin, curr_f
@@ -703,6 +705,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             SIZE_t[::1] batch_idcs = self.batch_idcs
             SIZE_t[::1] batch_y = self.batch_y
 
+            SIZE_t[::1] erase_this = self.erase_this
+            SIZE_t _idx
+
+
             double impurity_curr = 0.0
             double impurity_left = 0.0
             double impurity_right = 0.0
@@ -711,7 +717,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             double variance_left = 0.0
             double variance_right = 0.0
 
-        with gil: print("                 ...get batch_idcs and batch_y")
+        #with gil: print("                 ...get batch_idcs and batch_y")
         # batch_idcs and batch_y are invariants for a single call to sample_targets
         get_batch_idcs(
             batch_size, start, end, it,
@@ -731,16 +737,19 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
             # We've encountered a valid feature -> update it's histograms
             curr_f = candidates[row, 0]
+            #with gil: print("\n                 ...valid feature idx ", curr_f)
             for i in range(batch_size):
                 batch_binned_col[i] = <SIZE_t> self.X_binned[batch_idcs[i], curr_f]
             self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
-            # with gil: print("                 ...inserted histograms for feature idx ", curr_f)
 
             # for each valid (f, b) pair, compute impurity reductions (proxy)
             # -> analogous to get_impurity_reductions (in the python implementation) but for a single (f,b) pair
+            _idx = 0
             while curr_f == candidates[row, 0]:
                 if accesses[row] == 1:
                     bin = candidates[row, 1]
+                    erase_this[_idx] = bin
+                    _idx += 1
                     self.criterion.get_impurity_reductions(
                         curr_f, bin,                       # current (f,b) pair
                         &impurity_left, &impurity_right,  # location of the impurities
@@ -751,12 +760,13 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     arm_records[curr_f, bin].l_impurity = impurity_left
                     arm_records[curr_f, bin].r_impurity = impurity_right
                     estimates[curr_f, bin] = impurity_left + impurity_right
-                    cb_delta[curr_f, bin] = variance_left + variance_right
+                    cb_delta[curr_f, bin] = (variance_left + variance_right)** (1/2)
                     #with gil: print("                 ...computed one (f,b) pair")
                 row += 1
+            #with gil: print("                 ...valid bins: ", np.asarray(erase_this))
             # with gil: print("                 ...computed impurity for valid bins of feature idx ", curr_f)
 
-        with gil: print("               EXIT: sample_targets")
+        #with gil: print("               EXIT: sample_targets\n")
         return 0
 
 
@@ -778,7 +788,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
         # update split record
         best.feature = best_f
-        best.pos = 0
+        best.pos = 0    # Todo: how to update this???
         best.threshold = self.bin_thresholds[best_f, best_bin]
         best.improvement = impurity - (best_arm_record.l_impurity + best_arm_record.r_impurity)
         best.impurity_left = best_arm_record.l_impurity
@@ -797,7 +807,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             Returns -1 in case of failure to allocate memory (and raise MemoryError)
             or 0 otherwise.
             """
-            with gil: print("\n           ENTER: mab_split")
+            with gil: print("         ... ENTER: mab_split")
             # Find the best split
             cdef int n_samples = self.n_samples
             cdef SIZE_t[::1] samples = self.samples
@@ -856,6 +866,8 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
                 # Draw batch_size samples, insert histogram, and compute impurity & variance.
                 # sample_targets will modify samples_mask, estimates, and cb_delta using index broadcasting
+                #with gil:
+                    #print("               ...calling sample_targets")
                 self.sample_targets(
                     it, batch_size,
                     candidates, accesses,
@@ -864,7 +876,7 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 )
 
                 # update confidence bounds
-                with gil: print("               ...update confidence bounds")
+                #with gil: print("               ...update confidence bounds")
                 row = 0
                 while row < accesses.shape[0]:
 
@@ -888,10 +900,11 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 # Discard candidates which is equivalent to updating accesses. One important condition is that arms
                 # need to be at least \epsilon distance apart or they'll always overlap and make us draw O(n) samples.
                 # Recall that previously discarded candidates could be re-introduced.
-                with gil: print("               ...update masks")
+                #with gil: print("               ...update masks")
                 exact_mask = OR(
                     exact_mask,
-                    LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates), temp1)
+                    # LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates), temp1)
+                    LESS_THAN(estimates, (1 - epsilon) * get_min(estimates), temp1)
                 )
                 update_accesses(
                     accesses,
@@ -905,19 +918,29 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                 )
                 it += 1
 
-                with gil:
-                    self.update_best_split(impurity, estimates, arm_records, split)
+            with gil:
+                self.update_best_split(impurity, estimates, arm_records, split)
+                #print("split on (feature_idx, value): ", (split.feature, split.threshold))
 
-                # Reorganize into samples[start:best.pos] + samples[best.pos:end]
-                while p < partition_end:
-                    if self.X[samples[p], best.feature] <= best.threshold:
-                        p += 1
+            # Reorganize into samples[start:best_pos] + samples[best_pos:end]
+            while p < partition_end:
+                # with gil: print("this is self.X[samples[p], split.feature]: ", self.X[samples[p], split.feature])
+                if self.X[samples[p], split.feature] <= split.threshold:
+                    p += 1
 
-                    else:
-                        partition_end -= 1
-                        samples[p], samples[partition_end] = samples[partition_end], samples[p]
+                else:
+                    partition_end -= 1
+                    samples[p], samples[partition_end] = samples[partition_end], samples[p]
+
+            # "p" is the position that splits the newly arrange samples
+            # -> left child gets samples[start: p] and right child gets samples[p: end]
+            split[0].pos = p
                         
-            with gil: print("           EXIT: mab_split\n")
+            with gil:
+                print("             ...number of iterations: ", it + 1)
+                print("             ...left impurity: ", split[0].impurity_left)
+                print("             ...right impurity: ", split[0].impurity_right)
+                print("         ... EXIT: mab_split")
             return 0
 
 # Todo: define helper functions for mab_split.

@@ -73,6 +73,9 @@ cdef class Splitter:
     cdef SIZE_t[::1] batch_idcs
     cdef SIZE_t[::1] batch_y
 
+    # Todo: get rid of this
+    cdef SIZE_t[::1] erase_this
+
     # access is information about the valid ROWS of candidates.
     cdef SIZE_t[::1] samples_mask        # without replacement
     cdef SIZE_t[::1] accesses

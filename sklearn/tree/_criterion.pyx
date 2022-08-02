@@ -649,12 +649,8 @@ cdef class HistGini(ClassificationCriterion):
         self.end = end
         self.n_node_samples = end - start
         self.weighted_n_samples = weighted_n_samples
-        self.weighted_n_node_samples = 0.0
+        self.weighted_n_node_samples = self.n_node_samples
 
-        # resetting all changes by previous node
-        self.pos = self.start
-        self.weighted_n_left = 0.0
-        self.weighted_n_right = self.weighted_n_node_samples
 
         cdef:
             SIZE_t f, b
@@ -837,10 +833,10 @@ cdef inline void get_gini(
         variance[0] = 0.0
         return
 
-    cdef double p_end = 2 * histogram[bin, n_single_classes - 1] / n
+    cdef double p_end = histogram[bin, n_single_classes - 1] / n
     for c in range(n_single_classes):
         # compute impurity -> size n_single_classes
-        p += histogram[bin, c] / n
+        p = histogram[bin, c] / n
         p_sq += (p * p)
 
         if c == n_single_classes - 1:
@@ -848,7 +844,7 @@ cdef inline void get_gini(
 
         # compute variance -> size n_single_classes - 1
         v_p = (p * (1 - p) * (pop_size - n)) / (n * (pop_size - 1))
-        dG_dp = -2 * p + p_end
+        dG_dp = -2 * p + 2 * p_end
         v_g += dG_dp * dG_dp * v_p
 
     impurity[0] = weight * (1 - p_sq)
