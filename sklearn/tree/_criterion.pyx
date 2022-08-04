@@ -28,7 +28,7 @@ from ._utils cimport WeightedMedianCalculator
 from ._criterion cimport hist_struct
 
 # define dtype needed to allocating memory for histograms with numpy -> equivalent to hist_struct
-from libc.stdlib cimport calloc
+from libc.stdlib cimport calloc, free
 from libc.stdint cimport uintptr_t
 cdef hist_struct HISTOGRAM
 HISTOGRAM_DTYPE = np.asarray(<hist_struct[:1]> (&HISTOGRAM)).dtype
@@ -203,6 +203,9 @@ cdef class Criterion:
     cdef int init_histograms(self, SIZE_t num_bins, SIZE_t n_features, SIZE_t n_classes) except -1:
         pass
 
+    cdef int free_histograms(self):
+        pass
+
     cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
                   DOUBLE_t* sample_weight, double weighted_n_samples,
                   SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1:
@@ -224,7 +227,8 @@ cdef class ClassificationCriterion(Criterion):
     """Abstract criterion for classification."""
 
     def __cinit__(self, SIZE_t n_outputs,
-                  cnp.ndarray[SIZE_t, ndim=1] n_classes):
+                  cnp.ndarray[SIZE_t, ndim=1] n_classes,
+                  bint is_histogram):
         """Initialize attributes for this criterion.
 
         Parameters
@@ -234,6 +238,8 @@ cdef class ClassificationCriterion(Criterion):
         n_classes : numpy.ndarray, dtype=SIZE_t
             The number of unique classes in each target
         """
+        self.is_histogram = is_histogram
+
         self.sample_weight = NULL
 
         self.samples = NULL
@@ -268,7 +274,8 @@ cdef class ClassificationCriterion(Criterion):
         self.sum_right = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
 
         # we're only using a single output in mab_split
-        self.n_single_classes = self.n_classes[0]
+        if self.is_histogram:
+            self.n_single_classes = self.n_classes[0]
 
     def __reduce__(self):
         return (type(self),
@@ -457,7 +464,6 @@ cdef class ClassificationCriterion(Criterion):
             The memory address which we will save the node value into.
         """
         cdef SIZE_t k
-
         for k in range(self.n_outputs):
             memcpy(dest, &self.sum_total[k, 0], self.n_classes[k] * sizeof(double))
             dest += self.max_n_classes
@@ -627,7 +633,7 @@ cdef class HistGini(ClassificationCriterion):
     Some notable changes is that we no longer update sum_total/left/right but maintain histograms left/right instead.
     Also, the output y is of shape (n, 1) instead of (n, k).
     """
-    cdef int init_histograms(self, SIZE_t n_bins, SIZE_t n_features, SIZE_t n_classes) except -1:
+    cdef int init_histograms(self, SIZE_t n_bins, SIZE_t n_features, SIZE_t n_single_classes) except -1:
         self.histograms = np.empty(n_features, dtype=HISTOGRAM_DTYPE)
         cdef:
             SIZE_t f
@@ -635,8 +641,15 @@ cdef class HistGini(ClassificationCriterion):
 
         # dynamically allocating the histograms per feature
         for f in range(n_features):
-            histograms[f].left = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
-            histograms[f].right = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
+            histograms[f].left = <uintptr_t> calloc(n_bins * n_single_classes, sizeof(SIZE_t))
+            histograms[f].right = <uintptr_t> calloc(n_bins * n_single_classes, sizeof(SIZE_t))
+        return 0
+
+    cdef int free_histograms(self):
+        cdef SIZE_t f
+        for f in range(self.n_features):
+            free(<void *> self.histograms[f].left)
+            free(<void *> self.histograms[f].right)
         return 0
 
     cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
@@ -786,9 +799,44 @@ cdef class HistGini(ClassificationCriterion):
         get_gini(left, bin, left_sum, left_weight, n_node_samples, n_single_classes, impurity_left, variance_left)
         get_gini(right, bin, right_sum, right_weight, n_node_samples, n_single_classes, impurity_right, variance_right)
 
+    """
+    cdef void node_value(self, SIZE_t f, double * dest) nogil:
+        cdef:
+            SIZE_t k, c
+            DOUBLE_t * l_ptr
+            DOUBLE_t * r_ptr
+
+            SIZE_t n_bins = self.n_bins
+            SIZE_t n_single_classes = self.n_single_classes
+
+            hist_struct[::1] histograms = self.histograms
+            DOUBLE_t[:, ::1] left
+            DOUBLE_t[:, ::1] right
+
+            DOUBLE_t[::1] count_arr
+
+        # get 2d-histograms of best feature
+        with gil:
+            count_arr = np.empty(self.n_single_classes, dtype=np.float64)
+
+            l_ptr = <DOUBLE_t *> histograms[f].left
+            left = <DOUBLE_t[:n_bins, :n_single_classes]> l_ptr
+
+            r_ptr = <DOUBLE_t *> histograms[f].right
+            right = <DOUBLE_t[:n_bins, :n_single_classes]> r_ptr
+
+        # copy counts into destination.
+        # In the histogrammed version, concatenate same value n_output times
+        for c in range(self.n_single_classes):
+            count_arr[c] = (left[0, c] + right[0, c])
+
+        for k in range(self.n_outputs):
+            memcpy(dest, &count_arr[0], self.n_single_classes * sizeof(double))
+            dest += self.max_n_classes
+    """
+
     cdef double node_impurity(self) nogil:
         """Evaluate the impurity of the current node.
-
         Evaluate the Gini criterion as impurity of the current node,
         i.e. the impurity of samples[start:end]. The smaller the impurity the
         better.

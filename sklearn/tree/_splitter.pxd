@@ -41,6 +41,8 @@ cdef class Splitter:
     # The impurity computations are delegated to a criterion object.
 
     # Internal structures
+    cdef bint is_histogram
+
     cdef public Criterion criterion      # Impurity criterion
     cdef public SIZE_t max_features      # Number of features to test
     cdef public SIZE_t min_samples_leaf  # Min samples in a leaf
@@ -73,9 +75,6 @@ cdef class Splitter:
     cdef SIZE_t[::1] batch_idcs
     cdef SIZE_t[::1] batch_y
 
-    # Todo: get rid of this
-    cdef SIZE_t[::1] erase_this
-
     # access is information about the valid ROWS of candidates.
     cdef SIZE_t[::1] samples_mask        # without replacement
     cdef SIZE_t[::1] accesses
@@ -95,7 +94,6 @@ cdef class Splitter:
     cdef double[:,::1] lcbs
     cdef double[:,::1] ucbs
     cdef double[:,::1] cb_delta
-    cdef SIZE_t[:,::1] sample_count_arr
     cdef SIZE_t[:,::1] exact_mask
 
     # The samples vector `samples` is maintained by the Splitter object such

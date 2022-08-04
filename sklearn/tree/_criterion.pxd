@@ -26,6 +26,8 @@ cdef class Criterion:
     # such as the mean in regression and class probabilities in classification.
 
     # Internal structures
+    cdef bint is_histogram
+
     cdef const DOUBLE_t[:, ::1] y        # Values of y
     cdef DOUBLE_t* sample_weight         # Sample weights
 
@@ -69,6 +71,7 @@ cdef class Criterion:
 
     # function placeholders for HistGini -> any other criteria doesn't use these
     cdef int init_histograms(self, SIZE_t num_bins, SIZE_t n_features, SIZE_t n_classes) except -1
+    cdef int free_histograms(self)
     cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
                   DOUBLE_t* sample_weight, double weighted_n_samples,
                   SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1

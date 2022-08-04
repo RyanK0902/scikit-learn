@@ -330,10 +330,16 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         # Build tree
         criterion = self.criterion
+
+        # NOTE: HISTOGRAM SUPPORT ONLY AVAILABLE WITH CLASSIFICATION GINI!
+        is_histogram = 0
+        if self.splitter == "histogram":
+            is_histogram = 1
+
         if not isinstance(criterion, Criterion):
             if is_classification:
                 criterion = CRITERIA_CLF[self.criterion](
-                    self.n_outputs_, self.n_classes_
+                    self.n_outputs_, self.n_classes_, is_histogram
                 )
             else:
                 criterion = CRITERIA_REG[self.criterion](self.n_outputs_, n_samples)
@@ -367,6 +373,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 min_samples_leaf,
                 min_weight_leaf,
                 random_state,
+                is_histogram,
             )
 
         if is_classifier(self):
