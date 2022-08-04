@@ -267,6 +267,9 @@ cdef class ClassificationCriterion(Criterion):
         self.sum_left = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
         self.sum_right = np.zeros((n_outputs, max_n_classes), dtype=np.float64)
 
+        # we're only using a single output in mab_split
+        self.n_single_classes = self.n_classes[0]
+
     def __reduce__(self):
         return (type(self),
                 (self.n_outputs, np.asarray(self.n_classes)), self.__getstate__())
@@ -297,6 +300,8 @@ cdef class ClassificationCriterion(Criterion):
         end : SIZE_t
             The last sample to use in the mask
         """
+        # with gil: print("we hav enetered classificiation criteria init")
+
         self.y = y
         self.sample_weight = sample_weight
         self.samples = samples
@@ -623,19 +628,15 @@ cdef class HistGini(ClassificationCriterion):
     Also, the output y is of shape (n, 1) instead of (n, k).
     """
     cdef int init_histograms(self, SIZE_t n_bins, SIZE_t n_features, SIZE_t n_classes) except -1:
-        self.n_single_classes = n_classes
         self.histograms = np.empty(n_features, dtype=HISTOGRAM_DTYPE)
-
         cdef:
             SIZE_t f
-            hist_struct[::1] histograms
+            hist_struct[::1] histograms = self.histograms
 
         # dynamically allocating the histograms per feature
         for f in range(n_features):
             histograms[f].left = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
             histograms[f].right = <uintptr_t> calloc(n_bins * n_classes, sizeof(SIZE_t))
-
-        self.histograms = histograms
         return 0
 
     cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
@@ -648,31 +649,33 @@ cdef class HistGini(ClassificationCriterion):
         self.end = end
         self.n_node_samples = end - start
         self.weighted_n_samples = weighted_n_samples
-        self.weighted_n_node_samples = 0.0
+        self.weighted_n_node_samples = self.n_node_samples
 
-        # resetting all changes by previous node
-        self.pos = self.start
-        self.weighted_n_left = 0.0
-        self.weighted_n_right = self.weighted_n_node_samples
 
         cdef:
             SIZE_t f, b
+            SIZE_t* l_ptr
+            SIZE_t* r_ptr
+
             SIZE_t[:, ::1] left
             SIZE_t[:, ::1] right
 
             SIZE_t n_bins = self.n_bins
-            SIZE_t n_classes = self.n_single_classes
+            SIZE_t n_single_classes = self.n_single_classes
             hist_struct[::1] histograms = self.histograms
 
         for f in range(self.n_features):
             # reset left, right histograms in the struct
             with gil:
-                left = typecast(histograms[f].left, n_bins, n_classes)
-                right = typecast(histograms[f].right, n_bins, n_classes)
+                l_ptr = <SIZE_t *> histograms[f].left
+                left = <SIZE_t[:n_bins, :n_single_classes]> l_ptr
+
+                r_ptr = <SIZE_t *> histograms[f].right
+                right = <SIZE_t[:n_bins, :n_single_classes]> r_ptr
 
             for b in range(self.n_bins):
-                memset(&left[b, 0], 0, self.n_single_classes * sizeof(SIZE_t))
-                memset(&right[b, 0], 0, self.n_single_classes * sizeof(SIZE_t))
+                memset(&left[b, 0], 0, n_single_classes * sizeof(SIZE_t))
+                memset(&right[b, 0], 0, n_single_classes * sizeof(SIZE_t))
 
         return 0
 
@@ -685,28 +688,34 @@ cdef class HistGini(ClassificationCriterion):
             SIZE_t i, lj, rj, cl, cr
             SIZE_t y, bin
 
+            SIZE_t* l_ptr
+            SIZE_t* r_ptr
             SIZE_t[:, ::1] left
             SIZE_t[:, ::1] right
 
             SIZE_t n_bins = self.n_bins
-            SIZE_t n_classes = self.n_single_classes
+            SIZE_t n_single_classes = self.n_single_classes
             hist_struct[::1] histograms = self.histograms
 
         # getting left and right histograms
         with gil:
-            left = typecast(histograms[f].left, n_bins, n_classes)
-            right = typecast(histograms[f].right, n_bins, n_classes)
+            l_ptr = <SIZE_t *> histograms[f].left
+            left = <SIZE_t[:n_bins, :n_single_classes]> l_ptr
+
+            r_ptr = <SIZE_t *> histograms[f].right
+            right = <SIZE_t[:n_bins, :n_single_classes]> r_ptr
+
         for i in range(batch_size):
             y = batch_y[i]
             bin = bin_idcs[i]
 
             # left
-            for lj in range(bin, self.n_bins):
-                left[bin, y] += 1
+            for lj in range(bin, n_bins):
+                left[lj, y] += 1
 
             # right
             for rj in range(bin):
-                right[bin, y] += 1
+                right[rj, y] += 1
         return 0
 
     cdef void get_impurity_reductions(
@@ -750,13 +759,19 @@ cdef class HistGini(ClassificationCriterion):
             SIZE_t n_node_samples = self.n_node_samples
 
             hist_struct[::1] histograms = self.histograms
+
+            SIZE_t* l_ptr
+            SIZE_t* r_ptr
             SIZE_t[:, ::1] left
             SIZE_t[:, ::1] right
 
         # getting left, right histograms
         with gil:
-            left = typecast(histograms[f].left, n_bins, n_single_classes)
-            right = typecast(histograms[f].right, n_bins, n_single_classes)
+            l_ptr = <SIZE_t *> histograms[f].left
+            left = <SIZE_t[:n_bins, :n_single_classes]> l_ptr
+
+            r_ptr = <SIZE_t *> histograms[f].right
+            right = <SIZE_t[:n_bins, :n_single_classes]> r_ptr
 
         # initialize relevant coefficients
         for i in range(n_single_classes):
@@ -778,6 +793,8 @@ cdef class HistGini(ClassificationCriterion):
         i.e. the impurity of samples[start:end]. The smaller the impurity the
         better.
         """
+        # with gil: print("we have entered hist_gini's node impurity")
+
         cdef double gini = 0.0
         cdef double sq_count
         cdef double count_k
@@ -795,12 +812,6 @@ cdef class HistGini(ClassificationCriterion):
                                       self.weighted_n_node_samples)
 
         return gini / self.n_outputs
-
-cdef inline SIZE_t[:, ::1] typecast(uintptr_t ptr, SIZE_t n_bins, SIZE_t n_single_classes):
-    cdef SIZE_t* s_ptr = <SIZE_t *> ptr
-    cdef SIZE_t[:,::1] hist = <SIZE_t[:n_bins, :n_single_classes]> s_ptr
-    return hist
-
 
 cdef inline void get_gini(
         SIZE_t[:, ::1] histogram, SIZE_t bin,
@@ -822,16 +833,18 @@ cdef inline void get_gini(
         variance[0] = 0.0
         return
 
-    cdef double p_end = 2 * histogram[bin, n_single_classes] / n
+    cdef double p_end = histogram[bin, n_single_classes - 1] / n
     for c in range(n_single_classes):
-        p += histogram[bin, c] / n
+        # compute impurity -> size n_single_classes
+        p = histogram[bin, c] / n
         p_sq += (p * p)
 
-        if c == n_single_classes:
+        if c == n_single_classes - 1:
             break
 
+        # compute variance -> size n_single_classes - 1
         v_p = (p * (1 - p) * (pop_size - n)) / (n * (pop_size - 1))
-        dG_dp = -2 * p + p_end
+        dG_dp = -2 * p + 2 * p_end
         v_g += dG_dp * dG_dp * v_p
 
     impurity[0] = weight * (1 - p_sq)

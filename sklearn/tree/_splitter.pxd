@@ -16,6 +16,7 @@ from ._tree cimport DOUBLE_t         # Type of y, sample_weight
 from ._tree cimport SIZE_t           # Type for indices and counters
 from ._tree cimport INT32_t          # Signed 32 bit integer
 from ._tree cimport UINT32_t         # Unsigned 32 bit integer
+from ._tree cimport UINT8_t
 
 cdef struct SplitRecord:
     # Data to track sample split
@@ -62,13 +63,18 @@ cdef class Splitter:
     cdef const DOUBLE_t[:, ::1] y
     cdef DOUBLE_t* sample_weight
 
-    cdef SIZE_t[:,::1] X_binned         # Mappings of samples -> bins
-    cdef double[:,::1] bin_thresholds     # Thresholds per feature
-    cdef SIZE_t[::1] batch_binned_col   # 1d column of samples_to_bins
+    cdef UINT8_t[:,::1] X_binned         # Mappings of samples -> bins
+    cdef DOUBLE_t[:,::1] bin_thresholds  # Thresholds per feature
+    cdef SIZE_t[::1] batch_binned_col    # 1d column of samples_to_bins
+                                         # -> will be cast from np.uint8 to np.intp
 
     # arrays needed for sampling
     cdef SIZE_t batch_size
     cdef SIZE_t[::1] batch_idcs
+    cdef SIZE_t[::1] batch_y
+
+    # Todo: get rid of this
+    cdef SIZE_t[::1] erase_this
 
     # access is information about the valid ROWS of candidates.
     cdef SIZE_t[::1] samples_mask        # without replacement
@@ -116,7 +122,7 @@ cdef class Splitter:
 
     cdef int mab_split(self, double impurity, SplitRecord* split) nogil except -1
 
-    cdef int sample_targets(self, SIZE_t M, SIZE_t batch_size,
+    cdef int sample_targets(self, SIZE_t it, SIZE_t batch_size,
                             SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
                             double[:,::1] estimates, double[:,::1] cb_delta,
                             ArmRecord[:,::1] arm_records) nogil except -1

@@ -203,8 +203,9 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef SIZE_t batch_size
         cdef SIZE_t num_bins
         if is_histogram:
-            batch_size = 50
+            batch_size = 100
             num_bins = 10
+            print("=> Building Tree")
             splitter._init_mab(batch_size, num_bins)
         with nogil:
             # push root node onto stack
@@ -231,11 +232,18 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 n_node_samples = end - start
                 # splitter.node_reset(start, end, &weighted_n_node_samples)
+                with gil:
+                    print("\n     => Creating Node")
                 splitter.node_reset(first, start, end, &weighted_n_node_samples)
-                is_leaf = (depth >= max_depth or
-                           n_node_samples < min_samples_split or
-                           n_node_samples < 2 * min_samples_leaf or
-                           weighted_n_node_samples < 2 * min_weight_leaf)
+                with gil:
+                    print("         ... n_node_samples is ", n_node_samples)
+
+                is_leaf = (depth >= max_depth or    # max_depth = default 2147483647 (this seems weird...)
+                           n_node_samples < min_samples_split or    # min_samples_split = 2
+                           n_node_samples < 2 * min_samples_leaf or     # min_samples_leaf = 1
+                           weighted_n_node_samples < 2 * min_weight_leaf)   # min_weight_leaf = 0
+                if is_leaf:
+                    with gil: print("         ... this is a leaf")
 
                 if first:
                     impurity = splitter.node_impurity()
@@ -245,10 +253,15 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 is_leaf = is_leaf or impurity <= EPSILON
 
                 if not is_leaf:
+                    with gil:
+                        print("         ... calling node_split")
                     splitter.node_split(impurity, &split, &n_constant_features)
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are
                     # dissimilar to v0.18
+                    with gil:
+                        print("         ... improvement after split ", split.improvement + EPSILON)
+
                     is_leaf = (is_leaf or split.pos >= end or
                                (split.improvement + EPSILON <
                                 min_impurity_decrease))
@@ -263,6 +276,8 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 # Store value for all nodes, to facilitate tree/model
                 # inspection and interpretation
+                # Todo: hist doesn't support node_value except for the root node for now
+                #       -> this is ok since node_value is only used for best_first_tree builder???
                 splitter.node_value(tree.value + node_id * tree.value_stride)
 
                 if not is_leaf:
