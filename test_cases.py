@@ -1,6 +1,10 @@
 import numpy as np
 from sklearn.datasets import load_digits
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
+
+import pyximport
+pyximport.install()
 
 def tree_mnist(seed, is_histogram):
     np.random.seed(seed)
