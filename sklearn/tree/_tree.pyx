@@ -203,7 +203,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
         cdef SIZE_t batch_size
         cdef SIZE_t num_bins
         if is_histogram:
-            batch_size = 100
+            batch_size = 50
             num_bins = 10
             print("=> Building Tree")
             splitter._init_mab(batch_size, num_bins)
@@ -233,7 +233,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 n_node_samples = end - start
                 # splitter.node_reset(start, end, &weighted_n_node_samples)
                 with gil:
-                    print("\n     => Creating Node")
+                    print("\n     => Creating Node ", node_id)
                 splitter.node_reset(first, start, end, &weighted_n_node_samples)
                 with gil:
                     print("         ... n_node_samples is ", n_node_samples)
@@ -266,6 +266,8 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                                (split.improvement + EPSILON <
                                 min_impurity_decrease))
 
+                if not is_leaf:
+                    with gil: print("         ... feature and threshold to split on: ", (split.feature, split.threshold))
                 node_id = tree._add_node(parent, is_left, is_leaf, split.feature,
                                          split.threshold, impurity, n_node_samples,
                                          weighted_n_node_samples)
@@ -279,6 +281,7 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 # Todo: hist doesn't support node_value except for the root node for now
                 #       -> this is ok since node_value is only used for best_first_tree builder???
                 splitter.node_value(tree.value + node_id * tree.value_stride)
+                # splitter.node_value(split.feature, tree.value + node_id * tree.value_stride)
 
                 if not is_leaf:
                     # Push right child on stack
@@ -304,13 +307,15 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 if depth > max_depth_seen:
                     max_depth_seen = depth
 
+
             if rc >= 0:
                 rc = tree._resize_c(tree.node_count)
 
             if rc >= 0:
                 tree.max_depth = max_depth_seen
-        if rc == -1:
 
+        splitter.criterion.free_histograms()
+        if rc == -1:
             raise MemoryError()
 
 
@@ -518,6 +523,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
 
         # compute values also for split nodes (might become leafs later).
         splitter.node_value(tree.value + node_id * tree.value_stride)
+        #splitter.node_value(0, tree.value + node_id * tree.value_stride)
 
         res.node_id = node_id
         res.start = start

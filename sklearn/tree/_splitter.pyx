@@ -63,7 +63,7 @@ cdef class Splitter:
 
     def __cinit__(self, Criterion criterion, SIZE_t max_features,
                   SIZE_t min_samples_leaf, double min_weight_leaf,
-                  object random_state):
+                  object random_state, bint is_histogram):
         """
         Parameters
         ----------
@@ -86,6 +86,7 @@ cdef class Splitter:
         random_state : object
             The user inputted random state to be used for pseudo-randomness
         """
+        self.is_histogram = is_histogram
 
         self.criterion = criterion
 
@@ -168,16 +169,16 @@ cdef class Splitter:
 
         self.sample_weight = sample_weight
 
-        self.erase_this = np.empty(10, dtype=np.intp)
-
         # Todo: pass in histogram flag
-        cdef bint is_histogram = 1
-        cdef DTYPE_t[::1] X_row
-        cdef DTYPE_t[:,::1] X_binned_temp
+        cdef:
+            DTYPE_t[::1] X_row
+            DTYPE_t[:,::1] X_binned_temp
 
-        cdef DOUBLE_t[::1] f_bin_threshold
-        cdef DOUBLE_t[:,::1] bin_thresholds
-        if is_histogram:
+
+            DOUBLE_t[::1] f_bin_threshold
+            DOUBLE_t[:,::1] bin_thresholds
+
+        if self.is_histogram:
             bin_mapper = _BinMapper(
                          n_bins=10,
                          is_categorical=None,
@@ -193,21 +194,23 @@ cdef class Splitter:
             for i in range(j):
                 X_row = X[i]
                 X_binned_temp[i] = X_row
-            _X_binned = bin_mapper.fit_transform(X_binned_temp.base)
-            self.X_binned = np.ascontiguousarray(_X_binned, dtype=np.uint8)
+            #_X_binned = bin_mapper.fit_transform(X_binned_temp.base)
+            # self.X_binned = np.ascontiguousarray(_X_binned, dtype=np.uint8)
+            _X_binned_temp = bin_mapper.fit_transform(X_binned_temp.base)
+            self.X_binned = np.ascontiguousarray(_X_binned_temp, dtype=np.uint8)
 
             # fill in bin_thresholds.
             # -> need to convert list[np.ndarray(dtype=np.float64)] to np.ndarray
             bin_thresholds = np.empty((n_features, 10), dtype=np.float64)
             for i in range(n_features):
-                f_bin_threshold = np.asarray(bin_mapper.bin_thresholds_[i])
+                f_bin_threshold = np.asarray(bin_mapper.bin_thresholds_[i], dtype=np.float64)
                 for ii in range(10):
                     bin_thresholds[i, ii] = f_bin_threshold[ii]
             self.bin_thresholds = bin_thresholds
+            # print("BIN THRESHOLDS!!!", np.asarray(self.bin_thresholds))
 
             # batch_binned_col is used in sample_targets
             self.batch_binned_col = np.empty(self.batch_size, dtype=np.intp)
-            self.batch_idcs = np.empty(self.batch_size, dtype=np.intp)
 
             # initialize the histograms for all the features
             self.criterion.n_bins = 10
@@ -248,7 +251,24 @@ cdef class Splitter:
         """
         self.start = start
         self.end = end
-        if first:
+        if self.is_histogram:
+            if first:
+                self.criterion.init(self.y,
+                                    self.sample_weight,
+                                    self.weighted_n_samples,
+                                    &self.samples[0],
+                                    start,
+                                    end)
+
+            else:
+                self.criterion.hist_node_init(self.y,
+                                    self.sample_weight,
+                                    self.weighted_n_samples,
+                                    &self.samples[0],
+                                    start,
+                                    end)
+
+        else:
             self.criterion.init(self.y,
                                 self.sample_weight,
                                 self.weighted_n_samples,
@@ -256,13 +276,6 @@ cdef class Splitter:
                                 start,
                                 end)
 
-        else:
-            self.criterion.hist_node_init(self.y,
-                                self.sample_weight,
-                                self.weighted_n_samples,
-                                &self.samples[0],
-                                start,
-                                end)
         weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
         return 0
 
@@ -666,11 +679,10 @@ cdef class HistBestSplitter(BaseDenseSplitter):
         self.arm_records = np.empty((self.n_features, num_bins), dtype=RECORD_DTYPE)
 
         self.estimates = np.empty((self.n_features, num_bins), dtype=np.float64)
+        self.cb_delta = np.zeros((self.n_features, num_bins), dtype=np.float64)
         self.lcbs = np.empty((self.n_features, num_bins), dtype=np.float64)
         self.ucbs = np.empty((self.n_features, num_bins), dtype=np.float64)
-        self.cb_delta = np.zeros((self.n_features, num_bins), dtype=np.float64)
 
-        self.sample_count_arr = np.zeros((self.n_features, num_bins), dtype=np.int64)
         self.exact_mask = np.zeros((self.n_features, num_bins), dtype=np.intp)
         return 0
 
@@ -701,19 +713,14 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             SIZE_t end = self.end
             SIZE_t[::1] samples = self.samples
 
-            SIZE_t[::1] batch_binned_col = self.batch_binned_col
-            SIZE_t[::1] batch_idcs = self.batch_idcs
-            SIZE_t[::1] batch_y = self.batch_y
-
-            SIZE_t[::1] erase_this = self.erase_this
+            SIZE_t[::1] batch_binned_col = self.batch_binned_col    # initialized in init
+            SIZE_t[::1] batch_idcs = self.batch_idcs    # initialized in _init_mab
+            SIZE_t[::1] batch_y = self.batch_y    # initialized in _init_mab
             SIZE_t _idx
 
-
-            double impurity_curr = 0.0
             double impurity_left = 0.0
             double impurity_right = 0.0
 
-            double variance_curr = 0.0
             double variance_left = 0.0
             double variance_right = 0.0
 
@@ -748,7 +755,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             while curr_f == candidates[row, 0]:
                 if accesses[row] == 1:
                     bin = candidates[row, 1]
-                    erase_this[_idx] = bin
                     _idx += 1
                     self.criterion.get_impurity_reductions(
                         curr_f, bin,                       # current (f,b) pair
@@ -763,7 +769,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
                     cb_delta[curr_f, bin] = (variance_left + variance_right)** (1/2)
                     #with gil: print("                 ...computed one (f,b) pair")
                 row += 1
-            #with gil: print("                 ...valid bins: ", np.asarray(erase_this))
             # with gil: print("                 ...computed impurity for valid bins of feature idx ", curr_f)
 
         #with gil: print("               EXIT: sample_targets\n")
@@ -807,18 +812,12 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             Returns -1 in case of failure to allocate memory (and raise MemoryError)
             or 0 otherwise.
             """
-            with gil: print("         ... ENTER: mab_split")
+            #with gil: print("         ... ENTER: mab_split")
             # Find the best split
             cdef int n_samples = self.n_samples
             cdef SIZE_t[::1] samples = self.samples
             cdef SIZE_t start = self.start
             cdef SIZE_t end = self.end
-
-            cdef SplitRecord best
-            cdef double current_proxy_improvement = -INFINITY
-            cdef double best_proxy_improvement = -INFINITY
-
-            _init_split(&best, end)
 
             # initialize relevant variables.
             # Todo: fix this hard coding (default without_replacement, gini)
@@ -845,7 +844,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             cdef double[:,::1] lcbs = self.lcbs
             cdef double[:,::1] ucbs = self.ucbs
 
-            cdef SIZE_t[:,::1] sample_count_arr = self.sample_count_arr
             cdef SIZE_t[:,::1] exact_mask = self.exact_mask
 
             cdef SIZE_t p = start
@@ -858,7 +856,12 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             cdef SIZE_t it = 0
             cdef SIZE_t batch_size = self.batch_size
 
+            # with gil: print("total number of candidates: ", get_sum(accesses))
+
             while get_sum(accesses) > 5:
+
+                # with gil: print("total number of candidates: ", get_sum(accesses))
+
                 # we have drawn O(n) samples. Compute exactly from this point on
                 if batch_size * it > n_samples:
                     lcbs = ucbs = estimates
@@ -924,7 +927,6 @@ cdef class HistBestSplitter(BaseDenseSplitter):
 
             # Reorganize into samples[start:best_pos] + samples[best_pos:end]
             while p < partition_end:
-                # with gil: print("this is self.X[samples[p], split.feature]: ", self.X[samples[p], split.feature])
                 if self.X[samples[p], split.feature] <= split.threshold:
                     p += 1
 
@@ -935,12 +937,14 @@ cdef class HistBestSplitter(BaseDenseSplitter):
             # "p" is the position that splits the newly arrange samples
             # -> left child gets samples[start: p] and right child gets samples[p: end]
             split[0].pos = p
-                        
+
+            """
             with gil:
                 print("             ...number of iterations: ", it + 1)
                 print("             ...left impurity: ", split[0].impurity_left)
                 print("             ...right impurity: ", split[0].impurity_right)
                 print("         ... EXIT: mab_split")
+            """
             return 0
 
 # Todo: define helper functions for mab_split.
