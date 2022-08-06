@@ -251,31 +251,12 @@ cdef class Splitter:
         """
         self.start = start
         self.end = end
-        if self.is_histogram:
-            if first:
-                self.criterion.init(self.y,
-                                    self.sample_weight,
-                                    self.weighted_n_samples,
-                                    &self.samples[0],
-                                    start,
-                                    end)
-
-            else:
-                self.criterion.hist_node_init(self.y,
-                                    self.sample_weight,
-                                    self.weighted_n_samples,
-                                    &self.samples[0],
-                                    start,
-                                    end)
-
-        else:
-            self.criterion.init(self.y,
-                                self.sample_weight,
-                                self.weighted_n_samples,
-                                &self.samples[0],
-                                start,
-                                end)
-
+        self.criterion.init(self.y,
+                            self.sample_weight,
+                            self.weighted_n_samples,
+                            &self.samples[0],
+                            start,
+                            end)
         weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
         return 0
 
@@ -292,10 +273,10 @@ cdef class Splitter:
 
         pass
 
-    cdef void node_value(self, double* dest) nogil:
+    cdef void node_value(self, SIZE_t f, double* dest) nogil:
         """Copy the value of node samples[start:end] into dest."""
 
-        self.criterion.node_value(dest)
+        self.criterion.node_value(f, dest)
 
     cdef double node_impurity(self) nogil:
         """Return the impurity of the current node."""

@@ -63,7 +63,7 @@ cdef class Criterion:
     cdef double node_impurity(self) nogil
     cdef void children_impurity(self, double* impurity_left,
                                 double* impurity_right) nogil
-    cdef void node_value(self, double* dest) nogil
+    cdef void node_value(self, SIZE_t f, double* dest) nogil
     cdef double impurity_improvement(self, double impurity_parent,
                                      double impurity_left,
                                      double impurity_right) nogil
@@ -72,9 +72,7 @@ cdef class Criterion:
     # function placeholders for HistGini -> any other criteria doesn't use these
     cdef int init_histograms(self, SIZE_t num_bins, SIZE_t n_features, SIZE_t n_classes) except -1
     cdef int free_histograms(self)
-    cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
-                  DOUBLE_t* sample_weight, double weighted_n_samples,
-                  SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1
+    cdef int hist_node_init(self) nogil except -1
     cdef int insert_histograms(self, SIZE_t f, SIZE_t batch_size,
                                     SIZE_t[::1] bin_idcs, SIZE_t[::1] batch_y) nogil
     cdef void get_impurity_reductions(

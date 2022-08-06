@@ -132,7 +132,7 @@ cdef class Criterion:
         """
         pass
 
-    cdef void node_value(self, double* dest) nogil:
+    cdef void node_value(self, SIZE_t f, double* dest) nogil:
         """Placeholder for storing the node value.
 
         Placeholder for a method which will compute the node value
@@ -144,6 +144,7 @@ cdef class Criterion:
             The memory address where the node value should be stored.
         """
         pass
+
 
     cdef double proxy_impurity_improvement(self) nogil:
         """Compute a proxy of the impurity reduction.
@@ -206,9 +207,7 @@ cdef class Criterion:
     cdef int free_histograms(self):
         pass
 
-    cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
-                  DOUBLE_t* sample_weight, double weighted_n_samples,
-                  SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1:
+    cdef int hist_node_init(self) nogil except -1:
         pass
 
     cdef int insert_histograms(self, SIZE_t f, SIZE_t batch_size,
@@ -345,6 +344,12 @@ cdef class ClassificationCriterion(Criterion):
 
         # Reset to pos=start
         self.reset()
+
+        # Set all the histogram counts to zero for the next node. Note that we still need to update sum_total per node
+        # since this datastructure is used in node_value which caches values for the node prediction.
+        if self.is_histogram:
+            self.hist_node_init()
+
         return 0
 
     cdef int reset(self) nogil except -1:
@@ -455,7 +460,7 @@ cdef class ClassificationCriterion(Criterion):
                                 double* impurity_right) nogil:
         pass
 
-    cdef void node_value(self, double* dest) nogil:
+    cdef void node_value(self, SIZE_t f, double* dest) nogil:
         """Compute the node value of samples[start:end] and save it into dest.
 
         Parameters
@@ -466,7 +471,7 @@ cdef class ClassificationCriterion(Criterion):
         cdef SIZE_t k
         for k in range(self.n_outputs):
             memcpy(dest, &self.sum_total[k, 0], self.n_classes[k] * sizeof(double))
-            dest += self.max_n_classes
+            dest += self.max_n_classes  # is this important even if num_outputs = 1?
 
 
 cdef class Entropy(ClassificationCriterion):
@@ -652,19 +657,7 @@ cdef class HistGini(ClassificationCriterion):
             free(<void *> self.histograms[f].right)
         return 0
 
-    cdef int hist_node_init(self, const DOUBLE_t[:, ::1] y,
-                  DOUBLE_t* sample_weight, double weighted_n_samples,
-                  SIZE_t* samples, SIZE_t start, SIZE_t end) nogil except -1:
-        self.y = y
-        self.sample_weight = sample_weight
-        self.samples = samples
-        self.start = start
-        self.end = end
-        self.n_node_samples = end - start
-        self.weighted_n_samples = weighted_n_samples
-        self.weighted_n_node_samples = self.n_node_samples
-
-
+    cdef int hist_node_init(self) nogil except -1:
         cdef:
             SIZE_t f, b
             SIZE_t* l_ptr
@@ -813,11 +806,13 @@ cdef class HistGini(ClassificationCriterion):
             DOUBLE_t[:, ::1] left
             DOUBLE_t[:, ::1] right
 
-            DOUBLE_t[::1] count_arr
+            DOUBLE_t[::1] hist_sum_total
 
         # get 2d-histograms of best feature
         with gil:
-            count_arr = np.empty(self.n_single_classes, dtype=np.float64)
+            # hist_sum_total is analogous to sum_total in the vanilla setting
+            # i.e. an approximation of the total counts of the tree node
+            hist_sum_total = np.empty(self.max_n_classes, dtype=np.float64)
 
             l_ptr = <DOUBLE_t *> histograms[f].left
             left = <DOUBLE_t[:n_bins, :n_single_classes]> l_ptr
@@ -825,14 +820,17 @@ cdef class HistGini(ClassificationCriterion):
             r_ptr = <DOUBLE_t *> histograms[f].right
             right = <DOUBLE_t[:n_bins, :n_single_classes]> r_ptr
 
-        # copy counts into destination.
-        # In the histogrammed version, concatenate same value n_output times
-        for c in range(self.n_single_classes):
-            count_arr[c] = (left[0, c] + right[0, c])
+        # Fill in hist_sum_total array to copy into destination.
+        # Note that only the data until n_single_classes if important (the remainder is zeroed out)
+        for c in range(self.max_n_classes):
+            if k < self.n_single_classes:
+                hist_sum_total[c] = (left[0, c] + right[0, c])
+            else:
+                hist_sum_total[c] = 0.0
 
-        for k in range(self.n_outputs):
-            memcpy(dest, &count_arr[0], self.n_single_classes * sizeof(double))
-            dest += self.max_n_classes
+        # since we only have 1 output, concatenate k times for num_outputs (could be 1 anyway)
+        # this might cause problems later...
+        memcpy(dest, &hist_sum_total[0], self.n_outputs * self.max_n_classes * sizeof(double))
     """
 
     cdef double node_impurity(self) nogil:
@@ -1073,7 +1071,7 @@ cdef class RegressionCriterion(Criterion):
                                 double* impurity_right) nogil:
         pass
 
-    cdef void node_value(self, double* dest) nogil:
+    cdef void node_value(self, SIZE_t f, double* dest) nogil:
         """Compute the node value of samples[start:end] into dest."""
         cdef SIZE_t k
 
@@ -1392,7 +1390,7 @@ cdef class MAE(RegressionCriterion):
         self.pos = new_pos
         return 0
 
-    cdef void node_value(self, double* dest) nogil:
+    cdef void node_value(self, SIZE_t f, double* dest) nogil:
         """Computes the node value of samples[start:end] into dest."""
         cdef SIZE_t k
         for k in range(self.n_outputs):
