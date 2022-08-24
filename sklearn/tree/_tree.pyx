@@ -11,6 +11,7 @@
 #          Nelson Liu <nelson@nelsonliu.me>
 #
 # License: BSD 3 clause
+#cython: language_level=3
 
 from cpython cimport Py_INCREF, PyObject, PyTypeObject
 
@@ -197,7 +198,16 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
         cdef stack[StackRecord] builder_stack
         cdef StackRecord stack_record
+        cdef it = 0
 
+        cdef bint is_histogram = 1
+        cdef SIZE_t batch_size
+        cdef SIZE_t num_bins
+        if is_histogram:
+            batch_size = 50
+            num_bins = 10
+            print("=> Building Tree")
+            splitter._init_mab(batch_size, num_bins)
         with nogil:
             # push root node onto stack
             builder_stack.push({
@@ -222,14 +232,23 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 n_constant_features = stack_record.n_constant_features
 
                 n_node_samples = end - start
-                splitter.node_reset(start, end, &weighted_n_node_samples)
+                # splitter.node_reset(start, end, &weighted_n_node_samples)
+                with gil:
+                    print("\n     => Creating Node ", node_id)
+                splitter.node_reset(first, start, end, &weighted_n_node_samples)
+                with gil:
+                    print("         ... n_node_samples is ", n_node_samples)
 
-                is_leaf = (depth >= max_depth or
-                           n_node_samples < min_samples_split or
-                           n_node_samples < 2 * min_samples_leaf or
-                           weighted_n_node_samples < 2 * min_weight_leaf)
+                is_leaf = (depth >= max_depth or    # max_depth = default 2147483647 (this seems weird...)
+                           n_node_samples < min_samples_split or    # min_samples_split = 2
+                           n_node_samples < 2 * min_samples_leaf or     # min_samples_leaf = 1
+                           weighted_n_node_samples < 2 * min_weight_leaf)   # min_weight_leaf = 0
+                if is_leaf:
+                    with gil: print("         ... this is a leaf")
 
                 if first:
+                    # If we're not allowing for the approximations of the parent impurity, splitter.node_impurity()
+                    # should be called for each node (this is possible since each node has sum_total information)
                     impurity = splitter.node_impurity()
                     first = 0
 
@@ -237,13 +256,21 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 is_leaf = is_leaf or impurity <= EPSILON
 
                 if not is_leaf:
+                    with gil:
+                        print("         ... calling node_split")
                     splitter.node_split(impurity, &split, &n_constant_features)
                     # If EPSILON=0 in the below comparison, float precision
                     # issues stop splitting, producing trees that are
                     # dissimilar to v0.18
+                    with gil:
+                        print("         ... improvement after split ", split.improvement + EPSILON)
+
                     is_leaf = (is_leaf or split.pos >= end or
                                (split.improvement + EPSILON <
                                 min_impurity_decrease))
+
+                if not is_leaf:
+                    with gil: print("         ... feature and threshold to split on: ", (split.feature, split.threshold))
 
                 node_id = tree._add_node(parent, is_left, is_leaf, split.feature,
                                          split.threshold, impurity, n_node_samples,
@@ -255,8 +282,10 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
 
                 # Store value for all nodes, to facilitate tree/model
                 # inspection and interpretation
-                splitter.node_value(tree.value + node_id * tree.value_stride)
-
+                # Todo: hist doesn't support node_value except for the root node for now
+                #       -> this is ok since node_value is only used for best_first_tree builder???
+                #splitter.node_value(tree.value + node_id * tree.value_stride)
+                splitter.node_value(split.feature, tree.value + node_id * tree.value_stride)
                 if not is_leaf:
                     # Push right child on stack
                     builder_stack.push({
@@ -281,11 +310,14 @@ cdef class DepthFirstTreeBuilder(TreeBuilder):
                 if depth > max_depth_seen:
                     max_depth_seen = depth
 
+
             if rc >= 0:
                 rc = tree._resize_c(tree.node_count)
 
             if rc >= 0:
                 tree.max_depth = max_depth_seen
+
+        splitter.criterion.free_histograms()
         if rc == -1:
             raise MemoryError()
 
@@ -463,7 +495,7 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
         cdef SIZE_t n_left, n_right
         cdef double imp_diff
 
-        splitter.node_reset(start, end, &weighted_n_node_samples)
+        splitter.node_reset(0, start, end, &weighted_n_node_samples)
 
         if is_first:
             impurity = splitter.node_impurity()
@@ -493,7 +525,8 @@ cdef class BestFirstTreeBuilder(TreeBuilder):
             return -1
 
         # compute values also for split nodes (might become leafs later).
-        splitter.node_value(tree.value + node_id * tree.value_stride)
+        splitter.node_value(split.feature, tree.value + node_id * tree.value_stride)
+        #splitter.node_value(0, tree.value + node_id * tree.value_stride)
 
         res.node_id = node_id
         res.start = start
@@ -729,16 +762,22 @@ cdef class Tree:
             if self.capacity == 0:
                 capacity = 3  # default initial value
             else:
-                capacity = 2 * self.capacity
+                capacity = 2 * self.capacity    # increase capacity by x2
 
+        # Create twice the amount of space for self.nodes (maintain the original information)
+        # Create twice the amount of space for self.value (filled in by node_value)
         safe_realloc(&self.nodes, capacity)
         safe_realloc(&self.value, capacity * self.value_stride)
 
         # value memory is initialised to 0 to enable classifier argmax
         if capacity > self.capacity:
+            with gil:
+                print("====>>>>>memset within _resize_c")
+
             memset(<void*>(self.value + self.capacity * self.value_stride), 0,
                    (capacity - self.capacity) * self.value_stride *
                    sizeof(double))
+            with gil: print("====>>>>>finished memset")
 
         # if capacity smaller than node_count, adjust the counter
         if capacity < self.node_count:
@@ -759,6 +798,7 @@ cdef class Tree:
         """
         cdef SIZE_t node_id = self.node_count
 
+        # Increase capacity by x2 -> analogous to growing vectors in C++
         if node_id >= self.capacity:
             if self._resize_c() != 0:
                 return SIZE_MAX

@@ -66,6 +66,7 @@ DOUBLE = _tree.DOUBLE
 
 CRITERIA_CLF = {
     "gini": _criterion.Gini,
+    "hist_gini": _criterion.HistGini,
     "log_loss": _criterion.Entropy,
     "entropy": _criterion.Entropy,
 }
@@ -79,7 +80,11 @@ CRITERIA_REG = {
     "poisson": _criterion.Poisson,
 }
 
-DENSE_SPLITTERS = {"best": _splitter.BestSplitter, "random": _splitter.RandomSplitter}
+DENSE_SPLITTERS = {
+    "best": _splitter.BestSplitter,
+    "random": _splitter.RandomSplitter,
+    "histogram": _splitter.HistBestSplitter
+}
 
 SPARSE_SPLITTERS = {
     "best": _splitter.BestSparseSplitter,
@@ -99,7 +104,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
     """
 
     _parameter_constraints = {
-        "splitter": [StrOptions({"best", "random"})],
+        "splitter": [StrOptions({"best", "random", "histogram"})],
         "max_depth": [Interval(Integral, 1, None, closed="left"), None],
         "min_samples_split": [
             Interval(Integral, 2, None, closed="left"),
@@ -325,10 +330,16 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         # Build tree
         criterion = self.criterion
+
+        # NOTE: HISTOGRAM SUPPORT ONLY AVAILABLE WITH CLASSIFICATION GINI!
+        is_histogram = 0
+        if self.splitter == "histogram":
+            is_histogram = 1
+
         if not isinstance(criterion, Criterion):
             if is_classification:
                 criterion = CRITERIA_CLF[self.criterion](
-                    self.n_outputs_, self.n_classes_
+                    self.n_outputs_, self.n_classes_, is_histogram
                 )
             else:
                 criterion = CRITERIA_REG[self.criterion](self.n_outputs_, n_samples)
@@ -362,6 +373,7 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 min_samples_leaf,
                 min_weight_leaf,
                 random_state,
+                is_histogram,
             )
 
         if is_classifier(self):
@@ -847,7 +859,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
 
     _parameter_constraints = {
         **BaseDecisionTree._parameter_constraints,
-        "criterion": [StrOptions({"gini", "entropy", "log_loss"}), Hidden(Criterion)],
+        "criterion": [StrOptions({"gini", "hist_gini", "entropy", "log_loss"}), Hidden(Criterion)],
         "class_weight": [dict, list, StrOptions({"balanced"}), None],
     }
 

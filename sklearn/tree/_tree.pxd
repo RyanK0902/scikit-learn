@@ -18,6 +18,7 @@ ctypedef cnp.npy_float64 DOUBLE_t         # Type of y, sample_weight
 ctypedef cnp.npy_intp SIZE_t              # Type for indices and counters
 ctypedef cnp.npy_int32 INT32_t            # Signed 32 bit integer
 ctypedef cnp.npy_uint32 UINT32_t          # Unsigned 32 bit integer
+ctypedef cnp.npy_uint8 UINT8_t            # Unsigned 8 bit integer -> for bins
 
 from ._splitter cimport Splitter
 from ._splitter cimport SplitRecord

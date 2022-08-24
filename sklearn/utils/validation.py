@@ -923,7 +923,6 @@ def check_array(
 
     if copy and np.may_share_memory(array, array_orig):
         array = np.array(array, dtype=dtype, order=order)
-
     return array
 
 

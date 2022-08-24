@@ -14,6 +14,8 @@ import setuptools  # noqa
 from distutils.command.clean import clean as Clean
 from distutils.command.sdist import sdist
 
+
+
 import traceback
 import importlib
 
@@ -321,7 +323,6 @@ def setup_package():
         replace_method(CCompiler, "spawn", CCompiler_spawn)
 
         metadata["configuration"] = configuration
-
     setup(**metadata)
 
 

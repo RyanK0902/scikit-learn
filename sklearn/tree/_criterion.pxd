@@ -14,6 +14,11 @@ from ._tree cimport DOUBLE_t         # Type of y, sample_weight
 from ._tree cimport SIZE_t           # Type for indices and counters
 from ._tree cimport INT32_t          # Signed 32 bit integer
 from ._tree cimport UINT32_t         # Unsigned 32 bit integer
+from libc.stdint cimport uintptr_t
+
+cdef packed struct hist_struct:
+    uintptr_t left                   # uintptr_t is able to hold SIZE_t* ptr
+    uintptr_t right
 
 cdef class Criterion:
     # The criterion computes the impurity of a node and the reduction of
@@ -21,6 +26,8 @@ cdef class Criterion:
     # such as the mean in regression and class probabilities in classification.
 
     # Internal structures
+    cdef bint is_histogram
+
     cdef const DOUBLE_t[:, ::1] y        # Values of y
     cdef DOUBLE_t* sample_weight         # Sample weights
 
@@ -37,6 +44,12 @@ cdef class Criterion:
     cdef double weighted_n_left          # Weighted number of samples in the left node
     cdef double weighted_n_right         # Weighted number of samples in the right node
 
+    cdef SIZE_t n_bins
+    cdef SIZE_t n_features
+    cdef SIZE_t n_single_classes         # number of classes for the first target of y
+    cdef hist_struct[::1] histograms
+    cdef SIZE_t[:,::1] current_hist
+
     # The criterion object is maintained such that left and right collected
     # statistics correspond to samples[start:pos] and samples[pos:end].
 
@@ -50,11 +63,24 @@ cdef class Criterion:
     cdef double node_impurity(self) nogil
     cdef void children_impurity(self, double* impurity_left,
                                 double* impurity_right) nogil
-    cdef void node_value(self, double* dest) nogil
+    cdef void node_value(self, SIZE_t f, double* dest) nogil
     cdef double impurity_improvement(self, double impurity_parent,
                                      double impurity_left,
                                      double impurity_right) nogil
     cdef double proxy_impurity_improvement(self) nogil
+
+    # function placeholders for HistGini -> any other criteria doesn't use these
+    cdef int init_histograms(self, SIZE_t num_bins, SIZE_t n_features, SIZE_t n_classes) except -1
+    cdef int free_histograms(self)
+    cdef int hist_node_init(self) nogil except -1
+    cdef int insert_histograms(self, SIZE_t f, SIZE_t batch_size,
+                                    SIZE_t[::1] bin_idcs, SIZE_t[::1] batch_y) nogil
+    cdef void get_impurity_reductions(
+            self,
+            SIZE_t f, SIZE_t bin,
+            double * impurity_left,double * impurity_right,
+            double * variance_left, double * variance_right,
+    ) nogil
 
 cdef class ClassificationCriterion(Criterion):
     """Abstract criterion for classification."""

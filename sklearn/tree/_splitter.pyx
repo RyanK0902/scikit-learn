@@ -19,13 +19,17 @@ from libc.string cimport memcpy
 from libc.string cimport memset
 
 import numpy as np
+import itertools
+import random
 
 from scipy.sparse import csc_matrix
+from ..ensemble._hist_gradient_boosting.binning import _BinMapper
 
 from ._utils cimport log
 from ._utils cimport rand_int
 from ._utils cimport rand_uniform
 from ._utils cimport RAND_R_MAX
+from libc.stdlib cimport rand, RAND_MAX
 
 cdef double INFINITY = np.inf
 
@@ -35,6 +39,12 @@ cdef DTYPE_t FEATURE_THRESHOLD = 1e-7
 # Constant to switch between algorithm non zero value extract algorithm
 # in SparseSplitter
 cdef DTYPE_t EXTRACT_NNZ_SWITCH = 0.1
+
+# create dtype for splitrecord
+from ._splitter cimport ArmRecord
+cdef ArmRecord record
+RECORD_DTYPE = np.asarray(<ArmRecord[:1]> (&record)).dtype
+
 
 cdef inline void _init_split(SplitRecord* self, SIZE_t start_pos) nogil:
     self.impurity_left = INFINITY
@@ -53,7 +63,7 @@ cdef class Splitter:
 
     def __cinit__(self, Criterion criterion, SIZE_t max_features,
                   SIZE_t min_samples_leaf, double min_weight_leaf,
-                  object random_state):
+                  object random_state, bint is_histogram):
         """
         Parameters
         ----------
@@ -76,6 +86,7 @@ cdef class Splitter:
         random_state : object
             The user inputted random state to be used for pseudo-randomness
         """
+        self.is_histogram = is_histogram
 
         self.criterion = criterion
 
@@ -119,7 +130,6 @@ cdef class Splitter:
             closer than lower weight samples. If not provided, all samples
             are assumed to have uniform weight.
         """
-
         self.rand_r_state = self.random_state.randint(0, RAND_R_MAX)
         cdef SIZE_t n_samples = X.shape[0]
 
@@ -128,7 +138,7 @@ cdef class Splitter:
         self.samples = np.empty(n_samples, dtype=np.intp)
         cdef SIZE_t[::1] samples = self.samples
 
-        cdef SIZE_t i, j
+        cdef SIZE_t i, ii, j
         cdef double weighted_n_samples = 0.0
         j = 0
 
@@ -144,6 +154,7 @@ cdef class Splitter:
                 weighted_n_samples += 1.0
 
         # Number of samples is number of positively weighted samples
+        # Number of samples is number of positively weighted samples
         self.n_samples = j
         self.weighted_n_samples = weighted_n_samples
 
@@ -157,14 +168,77 @@ cdef class Splitter:
         self.y = y
 
         self.sample_weight = sample_weight
+
+        # Todo: pass in histogram flag
+        cdef:
+            DTYPE_t[::1] X_row
+            DTYPE_t[:,::1] X_binned_temp
+
+
+            DOUBLE_t[::1] f_bin_threshold
+            DOUBLE_t[:,::1] bin_thresholds
+
+        if self.is_histogram:
+            bin_mapper = _BinMapper(
+                         n_bins=10,
+                         is_categorical=None,
+                         known_categories=None,
+                         random_state=None,
+                         n_threads=None,
+            )
+
+            # fill up X_binned
+            X_binned_temp = np.empty((j, n_features), dtype=np.float32)
+            X_row = np.empty(n_features, dtype=np.float32)
+
+            for i in range(j):
+                X_row = X[i]
+                X_binned_temp[i] = X_row
+            #_X_binned = bin_mapper.fit_transform(X_binned_temp.base)
+            # self.X_binned = np.ascontiguousarray(_X_binned, dtype=np.uint8)
+            _X_binned_temp = bin_mapper.fit_transform(X_binned_temp.base)
+            self.X_binned = np.ascontiguousarray(_X_binned_temp, dtype=np.uint8)
+
+            # fill in bin_thresholds.
+            # -> need to convert list[np.ndarray(dtype=np.float64)] to np.ndarray
+            bin_thresholds = np.empty((n_features, 10), dtype=np.float64)
+            for i in range(n_features):
+                f_bin_threshold = np.asarray(bin_mapper.bin_thresholds_[i], dtype=np.float64)
+                for ii in range(10):
+                    bin_thresholds[i, ii] = f_bin_threshold[ii]
+            self.bin_thresholds = bin_thresholds
+            # print("BIN THRESHOLDS!!!", np.asarray(self.bin_thresholds))
+
+            # batch_binned_col is used in sample_targets
+            self.batch_binned_col = np.empty(self.batch_size, dtype=np.intp)
+
+            # initialize the histograms for all the features
+            self.criterion.n_bins = 10
+            self.criterion.init_histograms(10, n_features, self.criterion.n_single_classes)
         return 0
 
-    cdef int node_reset(self, SIZE_t start, SIZE_t end,
+    cdef int _init_mab(self, SIZE_t batch_size, SIZE_t num_bins) except -1:
+        pass
+
+    cdef int mab_split(self, double impurity, SplitRecord * split) nogil except -1:
+        pass
+
+    cdef int sample_targets(self, SIZE_t it, SIZE_t batch_size,
+                            SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
+                            double[:,::1] estimates, double[:,::1] cb_delta,
+                            ArmRecord[:,::1] arm_records) nogil except -1:
+        pass
+
+    cdef int update_best_split(self, double impurity, double[:,::1] estimates,
+                                   ArmRecord[:,::1] arm_records, SplitRecord* split) except -1:
+        pass
+
+    cdef int node_reset(self, bint first, SIZE_t start, SIZE_t end,
                         double* weighted_n_node_samples) nogil except -1:
-        """Reset splitter on node samples[start:end].
+        """Reset splitter on node samples[start:end]. 
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
-        or 0 otherwise.
+        or 0 otherwise. 
 
         Parameters
         ----------
@@ -175,19 +249,17 @@ cdef class Splitter:
         weighted_n_node_samples : ndarray, dtype=double pointer
             The total weight of those samples
         """
-
         self.start = start
         self.end = end
-
         self.criterion.init(self.y,
                             self.sample_weight,
                             self.weighted_n_samples,
                             &self.samples[0],
                             start,
                             end)
-
         weighted_n_node_samples[0] = self.criterion.weighted_n_node_samples
         return 0
+
 
     cdef int node_split(self, double impurity, SplitRecord* split,
                         SIZE_t* n_constant_features) nogil except -1:
@@ -201,10 +273,10 @@ cdef class Splitter:
 
         pass
 
-    cdef void node_value(self, double* dest) nogil:
+    cdef void node_value(self, SIZE_t f, double* dest) nogil:
         """Copy the value of node samples[start:end] into dest."""
 
-        self.criterion.node_value(dest)
+        self.criterion.node_value(f, dest)
 
     cdef double node_impurity(self) nogil:
         """Return the impurity of the current node."""
@@ -242,6 +314,7 @@ cdef class BestSplitter(BaseDenseSplitter):
                                self.min_samples_leaf,
                                self.min_weight_leaf,
                                self.random_state), self.__getstate__())
+
 
     cdef int node_split(self, double impurity, SplitRecord* split,
                         SIZE_t* n_constant_features) nogil except -1:
@@ -550,6 +623,402 @@ cdef void heapsort(DTYPE_t* Xf, SIZE_t* samples, SIZE_t n) nogil:
         sift_down(Xf, samples, 0, end)
         end = end - 1
 
+
+###############################################################################
+# Histogrammed version of BestSplitter
+###############################################################################
+
+# Todo: make logic work for multiclass -> currently only works for binary class
+cdef class HistBestSplitter(BaseDenseSplitter):
+    """Splitter for finding the best split."""
+    def __reduce__(self):
+        return (BestSplitter, (self.criterion,
+                               self.max_features,
+                               self.min_samples_leaf,
+                               self.min_weight_leaf,
+                               self.random_state), self.__getstate__())
+
+
+    cdef int _init_mab(self, SIZE_t batch_size, SIZE_t num_bins) except -1:
+        # candidates.shape = (F*B, 2) -> each row corresponds to a (f,b) pair
+        self.candidates = np.array(
+            list(itertools.product(range(self.n_features), range(num_bins))),
+            dtype=np.intp
+        )
+
+        self.batch_size = batch_size
+        self.batch_idcs = np.empty(batch_size, dtype=np.intp)
+        self.batch_y = np.empty(batch_size, dtype=np.intp)
+        self.accesses = np.ones(self.candidates.shape[0], dtype=np.intp)  # 1d array
+
+        self.temp1 = np.empty((self.n_features, num_bins), dtype=np.intp)
+        self.temp2 = np.empty((self.n_features, num_bins), dtype=np.intp)
+        self.temp3 = np.empty((self.n_features, num_bins), dtype=np.intp)
+
+        # We will only modify the impurity_left and impurity_right fields.
+        # -> allows us to avoid recomputing current histogram each time
+        self.arm_records = np.empty((self.n_features, num_bins), dtype=RECORD_DTYPE)
+
+        self.estimates = np.empty((self.n_features, num_bins), dtype=np.float64)
+        self.cb_delta = np.zeros((self.n_features, num_bins), dtype=np.float64)
+        self.lcbs = np.empty((self.n_features, num_bins), dtype=np.float64)
+        self.ucbs = np.empty((self.n_features, num_bins), dtype=np.float64)
+
+        self.exact_mask = np.zeros((self.n_features, num_bins), dtype=np.intp)
+        return 0
+
+    cdef int node_split(
+            self,
+            double impurity,
+            SplitRecord* split,
+            SIZE_t* n_constant_features
+        ) nogil except -1:
+
+        self.mab_split(impurity, split)
+        return 0
+
+    cdef int sample_targets(
+            self,
+            SIZE_t it, SIZE_t batch_size,
+            SIZE_t[:,::1] candidates, SIZE_t[::1] accesses,
+            double[:,::1] estimates, double[:,::1] cb_delta,
+            ArmRecord[:,::1] arm_records
+    ) nogil except -1:
+        #with gil: print("\n               ENTER: sample_targets")
+        cdef:
+            SIZE_t i, sample_i
+            SIZE_t bin, curr_f
+            SIZE_t row = 0
+
+            SIZE_t start = self.start
+            SIZE_t end = self.end
+            SIZE_t[::1] samples = self.samples
+
+            SIZE_t[::1] batch_binned_col = self.batch_binned_col    # initialized in init
+            SIZE_t[::1] batch_idcs = self.batch_idcs    # initialized in _init_mab
+            SIZE_t[::1] batch_y = self.batch_y    # initialized in _init_mab
+            SIZE_t _idx
+
+            double impurity_left = 0.0
+            double impurity_right = 0.0
+
+            double variance_left = 0.0
+            double variance_right = 0.0
+
+        #with gil: print("                 ...get batch_idcs and batch_y")
+        # batch_idcs and batch_y are invariants for a single call to sample_targets
+        get_batch_idcs(
+            batch_size, start, end, it,
+            batch_idcs, samples,
+        )
+        for i in range(batch_size):
+            batch_y[i] = <SIZE_t> self.y[batch_idcs[i], 0]
+
+        # iterate over the candidates and compute impurity reductions by updating the histograms
+        # -> insert histograms for valid features, compute impurity for the feature's bins, and update the impurities
+        while row < accesses.shape[0]:
+
+            # only get the valid candidates
+            if accesses[row] == 0:
+                row += 1
+                continue
+
+            # We've encountered a valid feature -> update it's histograms
+            curr_f = candidates[row, 0]
+            #with gil: print("\n                 ...valid feature idx ", curr_f)
+            for i in range(batch_size):
+                batch_binned_col[i] = <SIZE_t> self.X_binned[batch_idcs[i], curr_f]
+            self.criterion.insert_histograms(candidates[row, 0], batch_size, batch_binned_col, batch_y)
+
+            # for each valid (f, b) pair, compute impurity reductions (proxy)
+            # -> analogous to get_impurity_reductions (in the python implementation) but for a single (f,b) pair
+            _idx = 0
+            while curr_f == candidates[row, 0]:
+                if accesses[row] == 1:
+                    bin = candidates[row, 1]
+                    _idx += 1
+                    self.criterion.get_impurity_reductions(
+                        curr_f, bin,                       # current (f,b) pair
+                        &impurity_left, &impurity_right,  # location of the impurities
+                        &variance_left, &variance_right,  # location of the variances
+                    )
+
+                    # update relevant records
+                    arm_records[curr_f, bin].l_impurity = impurity_left
+                    arm_records[curr_f, bin].r_impurity = impurity_right
+                    estimates[curr_f, bin] = impurity_left + impurity_right
+                    cb_delta[curr_f, bin] = (variance_left + variance_right)** (1/2)
+                    #with gil: print("                 ...computed one (f,b) pair")
+                row += 1
+            # with gil: print("                 ...computed impurity for valid bins of feature idx ", curr_f)
+
+        #with gil: print("               EXIT: sample_targets\n")
+        return 0
+
+
+    cdef int update_best_split(self, double impurity, double[:,::1] estimates,
+                               ArmRecord[:,::1] arm_records, SplitRecord* split) except -1:
+        cdef:
+            SIZE_t best_f, best_bin, best_val
+            SplitRecord best
+            ArmRecord best_arm_record
+
+        # get best split
+        np_estimates = np.asarray(estimates)
+        best_splits = zip(
+            np.where(np_estimates == np.nanmin(np_estimates))[0],
+            np.where(np_estimates == np.nanmin(np_estimates))[1],
+        )
+        (best_f, best_bin) = random.choice(list(best_splits))
+        best_arm_record = arm_records[best_f, best_bin]
+
+        # update split record
+        best.feature = best_f
+        best.pos = 0    # Todo: how to update this???
+        best.threshold = self.bin_thresholds[best_f, best_bin]
+        best.improvement = impurity - (best_arm_record.l_impurity + best_arm_record.r_impurity)
+        best.impurity_left = best_arm_record.l_impurity
+        best.impurity_right = best_arm_record.r_impurity
+
+        split[0] = best
+        return 0
+
+    cdef int mab_split(self, double impurity, SplitRecord* split) nogil except -1:
+            """
+            Find the best split on node samples[start:end] using MABSplit subroutine. 
+            Note that dynamic sizing of arrays is non-trivial with nogil (as opposed to the Python version).
+            The work-around is to allocate memory for the biggest possible case (usually size FxB) and keep smart
+            indices to maintain dynamic sizing. 
+            
+            Returns -1 in case of failure to allocate memory (and raise MemoryError)
+            or 0 otherwise.
+            """
+            #with gil: print("         ... ENTER: mab_split")
+            # Find the best split
+            cdef int n_samples = self.n_samples
+            cdef SIZE_t[::1] samples = self.samples
+            cdef SIZE_t start = self.start
+            cdef SIZE_t end = self.end
+
+            # initialize relevant variables.
+            # Todo: fix this hard coding (default without_replacement, gini)
+            cdef double epsilon = 0.0
+            cdef double CONF_MULTIPLIER = 1.96
+            cdef double MIN_IMPURITY_DECREASE = 0.0
+
+            # access is information about the valid ROWS.
+            # Can't modify in-place since previously discarded candidates can be re-introduced.
+            cdef SIZE_t[::1] accesses = self.accesses
+            cdef SIZE_t[:,::1] temp1 = self.temp1
+            cdef SIZE_t[:,::1] temp2 = self.temp2
+            cdef SIZE_t[:,::1] temp3 = self.temp3
+
+            # Values that are 1 in the mask are the valid candidates (initially all zero).
+            # All rows of constant features (known + found) are excluded from candidates.
+            cdef SIZE_t[:,::1] candidates = self.candidates
+
+            # Candidates can move from being excluded to included as the value of
+            # the estimates change with more samples (the min ucb gets larger).
+            cdef ArmRecord[:,::1] arm_records = self.arm_records
+            cdef double[:,::1] estimates = self.estimates
+            cdef double[:,::1] cb_delta = self.cb_delta
+            cdef double[:,::1] lcbs = self.lcbs
+            cdef double[:,::1] ucbs = self.ucbs
+
+            cdef SIZE_t[:,::1] exact_mask = self.exact_mask
+
+            cdef SIZE_t p = start
+            cdef SIZE_t partition_end = end
+
+            # Start of the main looping logic:
+            # loop over valid candidates until only a critical number of candidates are left. Candidates are discarded
+            # if their lcb is greater than the smallest ucb (i.e. there's no overlap in confidence bounds).
+            cdef SIZE_t f, b, row
+            cdef SIZE_t it = 0
+            cdef SIZE_t batch_size = self.batch_size
+
+            # with gil: print("total number of candidates: ", get_sum(accesses))
+
+            while get_sum(accesses) > 5:
+
+                # with gil: print("total number of candidates: ", get_sum(accesses))
+
+                # we have drawn O(n) samples. Compute exactly from this point on
+                if batch_size * it > n_samples:
+                    lcbs = ucbs = estimates
+                    break
+
+                # Draw batch_size samples, insert histogram, and compute impurity & variance.
+                # sample_targets will modify samples_mask, estimates, and cb_delta using index broadcasting
+                #with gil:
+                    #print("               ...calling sample_targets")
+                self.sample_targets(
+                    it, batch_size,
+                    candidates, accesses,
+                    estimates, cb_delta,
+                    arm_records
+                )
+
+                # update confidence bounds
+                #with gil: print("               ...update confidence bounds")
+                row = 0
+                while row < accesses.shape[0]:
+
+                    if accesses[row] != 1:
+                        row += 1
+                        continue
+
+                    f = candidates[row][0]
+                    b = candidates[row][1]
+                    lcbs[f, b] = estimates[f, b] - CONF_MULTIPLIER * cb_delta[f, b]
+                    ucbs[f, b] = estimates[f, b] + CONF_MULTIPLIER * cb_delta[f, b]
+                    row += 1
+
+
+                # None of the CIs overlap with 0.
+                # We are confident that there is no possible impurity reduction.
+                #print("...")
+                if get_min(lcbs) > 0:
+                    break
+
+                # Discard candidates which is equivalent to updating accesses. One important condition is that arms
+                # need to be at least \epsilon distance apart or they'll always overlap and make us draw O(n) samples.
+                # Recall that previously discarded candidates could be re-introduced.
+                #with gil: print("               ...update masks")
+                exact_mask = OR(
+                    exact_mask,
+                    # LESS_THAN(lcbs, (1 - epsilon) * get_min(estimates), temp1)
+                    LESS_THAN(estimates, (1 - epsilon) * get_min(estimates), temp1)
+                )
+                update_accesses(
+                    accesses,
+                    AND_2d(
+                        LESS_THAN(lcbs, MIN_IMPURITY_DECREASE, temp2),
+                        AND_2d(
+                            EQUAL_TO(exact_mask, 0),
+                            LESS_THAN(lcbs, get_min(ucbs), temp3)
+                        )
+                    )
+                )
+                it += 1
+
+            with gil:
+                self.update_best_split(impurity, estimates, arm_records, split)
+                #print("split on (feature_idx, value): ", (split.feature, split.threshold))
+
+            # Reorganize into samples[start:best_pos] + samples[best_pos:end]
+            while p < partition_end:
+                if self.X[samples[p], split.feature] <= split.threshold:
+                    p += 1
+
+                else:
+                    partition_end -= 1
+                    samples[p], samples[partition_end] = samples[partition_end], samples[p]
+
+            # "p" is the position that splits the newly arrange samples
+            # -> left child gets samples[start: p] and right child gets samples[p: end]
+            split[0].pos = p
+
+            """
+            with gil:
+                print("             ...number of iterations: ", it + 1)
+                print("             ...left impurity: ", split[0].impurity_left)
+                print("             ...right impurity: ", split[0].impurity_right)
+                print("         ... EXIT: mab_split")
+            """
+            return 0
+
+# Todo: define helper functions for mab_split.
+cdef inline SIZE_t get_sum(SIZE_t[::1] arr) nogil:
+    cdef SIZE_t i
+    cdef SIZE_t sum = 0
+    for i in range(arr.shape[0]):
+        sum += arr[i]
+    return sum
+
+cdef inline double get_min(double[:,::1] arr) nogil:
+    cdef SIZE_t i, j
+    cdef double min = arr[0, 0]
+
+    for i in range(arr.shape[0]):
+        for j in range(arr.shape[1]):
+            if arr[i, j] < min:
+                min = arr[i, j]
+    return min
+
+
+cdef inline int update_accesses(SIZE_t[::1] accesses, SIZE_t[:,::1] arr) nogil:
+    # go from (F, B) to (FxB, 1) -> basically stacking rows on top of each other
+    cdef SIZE_t i, j
+    for i in range(arr.shape[0]):
+        for j in range(arr.shape[1]):
+            accesses[i + j] = arr[i,j]
+    return 0
+
+
+cdef inline void get_batch_idcs(SIZE_t batch_size, SIZE_t start, SIZE_t end, SIZE_t it,
+                                        SIZE_t[::1] batch_idcs, SIZE_t[::1] samples) nogil:
+    cdef SIZE_t M = (end - start) - it * batch_size + 1
+    cdef SIZE_t i = 0
+    cdef SIZE_t sample_i
+
+    # if we don't at least have batch_size samples left
+    if M < batch_size:
+        while i < M:
+            sample_i = start + i
+            batch_idcs[i] = samples[sample_i]
+            i += 1
+    else:
+        while i < batch_size:
+            sample_i = <SIZE_t> (rand() * M / float(RAND_MAX))
+            batch_idcs[i] = samples[start + sample_i]
+            samples[end - i], samples[start + sample_i] = samples[start + sample_i], samples[end - i]
+            i += 1
+            M -= 1
+    return
+
+
+# Functions in capital letters are analogous to bitwise operations. These functions should be as efficient as
+# bitwise operations in Python. Todo: Does this mean we shouldn't be iterating over the entire array?
+cdef inline SIZE_t[:,::1] OR(SIZE_t[:,::1] lhs, SIZE_t[:,::1] rhs) nogil:
+    cdef SIZE_t i, j
+    for i in range(lhs.shape[0]):
+        for j in range(lhs.shape[1]):
+            lhs[i, j] |= rhs[i, j]
+    return lhs
+
+cdef inline SIZE_t[:,::1] AND_2d(SIZE_t[:,::1] lhs, SIZE_t[:,::1] rhs) nogil:
+    cdef SIZE_t i, j
+    for i in range(lhs.shape[0]):
+        for j in range(lhs.shape[1]):
+            lhs[i, j] &= rhs[i, j]
+    return lhs
+
+cdef inline SIZE_t[::1] AND_1d(SIZE_t[::1] lhs, SIZE_t[::1] rhs) nogil:
+    cdef SIZE_t i
+    for i in range(lhs.shape[0]):
+        lhs[i] &= rhs[i]
+    return lhs
+
+cdef inline SIZE_t[:,::1] EQUAL_TO(SIZE_t[:,::1] lhs, double scalar) nogil:
+    cdef SIZE_t i, j
+    for i in range(lhs.shape[0]):
+        for j in range(lhs.shape[1]):
+            if lhs[i, j] == scalar:
+                lhs[i, j] = 1
+            else:
+                lhs[i, j] = 0
+    return lhs
+
+cdef inline SIZE_t[:,::1] LESS_THAN(double[:,::1] lhs, double scalar, SIZE_t[:,::1] res) nogil:
+    cdef SIZE_t i, j
+    for i in range(lhs.shape[0]):
+        for j in range(lhs.shape[1]):
+            if lhs[i, j] < scalar:
+                res[i, j] = 1
+            else:
+                res[i, j] = 0
+    return res
 
 cdef class RandomSplitter(BaseDenseSplitter):
     """Splitter for finding the best random split."""
